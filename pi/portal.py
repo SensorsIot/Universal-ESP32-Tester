@@ -107,11 +107,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             const el = document.getElementById('devices');
             const devices = (data.devices || []).filter(d => !d.skipped);
             if (devices.length > 0) {
-                el.innerHTML = devices.map(d => 
-                    '<div class="device ' + (d.attached ? 'attached' : 'bound') + '">' +
-                    '<span><strong>' + d.busid + '</strong>: ' + d.name + '</span>' +
-                    '<span>' + (d.attached ? '&#10003; attached' : '&#9679; bound') + '</span></div>'
-                ).join('');
+                el.innerHTML = devices.map(d => {
+                    let info = d.product || d.name;
+                    if (d.serial) info += ' <small style="color:#666">[' + d.serial + ']</small>';
+                    return '<div class="device ' + (d.attached ? 'attached' : 'bound') + '">' +
+                        '<div><strong>' + d.busid + '</strong>: ' + info + '</div>' +
+                        '<div>' + (d.attached ? '&#10003; attached' : '&#9679; bound') + '</div></div>';
+                }).join('');
             } else { el.innerHTML = '<p>No serial devices</p>'; }
         }
         async function loadVms() {
@@ -219,7 +221,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         attached.add(m.group(1))
         except: pass
         return attached
-    
+
+    def get_device_info(self, busid):
+        """Read device info from sysfs"""
+        info = {}
+        sysfs = f"/sys/bus/usb/devices/{busid}"
+        for attr in ['product', 'serial', 'manufacturer', 'idVendor', 'idProduct']:
+            try:
+                with open(f"{sysfs}/{attr}") as f:
+                    info[attr] = f.read().strip()
+            except: pass
+        return info
+
     def get_devices(self):
         devices = []
         attached = self.get_vm_attached()
@@ -233,9 +246,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 elif current_busid and line.strip() and not line.startswith(' -'):
                     name = line.strip()
                     skipped = 'ethernet' in name.lower()
+                    info = self.get_device_info(current_busid)
                     devices.append({
                         'busid': current_busid,
                         'name': name,
+                        'product': info.get('product', ''),
+                        'serial': info.get('serial', ''),
                         'skipped': skipped,
                         'attached': current_busid in attached
                     })
