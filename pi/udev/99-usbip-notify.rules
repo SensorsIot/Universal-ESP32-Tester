@@ -1,6 +1,5 @@
-# USB serial device connected - bind and notify VM
-ACTION=="add", SUBSYSTEM=="usb", ATTR{bInterfaceClass}=="02", RUN+="/usr/local/bin/usbip-bind-all.sh", RUN+="/usr/local/bin/notify-vm.sh connect %k &"
-ACTION=="add", SUBSYSTEM=="usb", ATTR{bInterfaceClass}=="ff", RUN+="/usr/local/bin/usbip-bind-all.sh", RUN+="/usr/local/bin/notify-vm.sh connect %k &"
+# USB device connected - notify VM (trigger on device, not interface)
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{bDeviceClass}!="09", RUN+="/usr/local/bin/usbip-bind-all.sh", RUN+="/bin/sh -c '/usr/local/bin/notify-vm.sh connect %k &'"
 
-# USB serial device disconnected - notify VM
-ACTION=="remove", SUBSYSTEM=="usb", RUN+="/usr/local/bin/notify-vm.sh disconnect %k &"
+# USB device disconnected - notify VM
+ACTION=="remove", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", RUN+="/bin/sh -c '/usr/local/bin/notify-vm.sh disconnect %k &'"
