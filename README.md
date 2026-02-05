@@ -46,13 +46,13 @@ sudo apt update && sudo apt install -y python3-pip curl
 sudo pip3 install esptool --break-system-packages
 
 # Clone repo
-git clone https://github.com/YOUR_USER/USB-via-Ethernet.git
-cd USB-via-Ethernet/pi
+git clone https://github.com/SensorsIot/Serial-via-Ethernet.git
+cd Serial-via-Ethernet/pi
 
 # Install portal and scripts
 sudo cp portal.py /usr/local/bin/rfc2217-portal
-sudo cp scripts/rfc2217-hotplug.sh /usr/local/bin/rfc2217-hotplug
-sudo chmod +x /usr/local/bin/rfc2217-portal /usr/local/bin/rfc2217-hotplug
+sudo cp scripts/rfc2217-hotplug.sh /usr/local/bin/rfc2217-hotplug.sh
+sudo chmod +x /usr/local/bin/rfc2217-portal /usr/local/bin/rfc2217-hotplug.sh
 
 # Install udev rules (auto-start on device plug)
 sudo cp udev/99-rfc2217.rules /etc/udev/rules.d/
@@ -309,13 +309,19 @@ if __name__ == '__main__':
 
 ## Port Assignment
 
-| Port | Device |
-|------|--------|
-| 4001 | First ESP32 |
-| 4002 | Second ESP32 |
-| 4003+ | Additional devices |
+Ports are assigned based on **device serial number** for persistence:
 
-Ports are assigned automatically in order of device detection. Check the web portal for current assignments.
+| Serial Number | Port |
+|---------------|------|
+| 94_A9_90_47_5B_48 | 4001 |
+| A5069RR4 | 4002 |
+| (new device) | 4003+ |
+
+**Key feature:** When an ESP32 resets or reconnects, it keeps the same port even if the tty name changes (e.g., ttyACM0 -> ttyACM1). This ensures containers always connect to the same device.
+
+Config stored in: `/etc/rfc2217/devices.conf`
+
+Check the web portal for current assignments.
 
 ---
 

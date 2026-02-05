@@ -241,14 +241,14 @@ ACTION=="remove", SUBSYSTEM=="tty", KERNEL=="ttyUSB*", RUN+="/usr/local/bin/rfc2
 
 ## 5. Implementation Tasks
 
-- [ ] **TASK-001:** Modify portal.py to use serial numbers as config keys
-- [ ] **TASK-002:** Update assign_port() to prefer serial number
-- [ ] **TASK-003:** Update read_config/write_config for new format
-- [ ] **TASK-004:** Add migration for existing tty-based config
-- [ ] **TASK-005:** Fix udev rule to call correct hotplug script name
+- [x] **TASK-001:** Modify portal.py to use serial numbers as config keys
+- [x] **TASK-002:** Update assign_port() to prefer serial number
+- [x] **TASK-003:** Update read_config/write_config for new format
+- [x] **TASK-004:** Add migration for existing tty-based config
+- [x] **TASK-005:** Fix udev rule to call correct hotplug script name
 - [ ] **TASK-006:** Test all test cases
-- [ ] **TASK-007:** Update documentation
-- [ ] **TASK-008:** Deploy to Serial Pi (192.168.0.87)
+- [x] **TASK-007:** Update documentation
+- [x] **TASK-008:** Deploy to Serial Pi (192.168.0.87)
 
 ---
 
@@ -257,3 +257,4 @@ ACTION=="remove", SUBSYSTEM=="tty", KERNEL=="ttyUSB*", RUN+="/usr/local/bin/rfc2
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 1.0 | 2026-02-05 | Claude | Initial FSD |
+| 1.1 | 2026-02-05 | Claude | Implemented FR-001 (persistent port assignment) |
