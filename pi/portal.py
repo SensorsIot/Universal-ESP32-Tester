@@ -207,25 +207,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return '127.0.0.1'
 
     def read_config(self):
-        """Read device-port assignments: {tty: port}"""
+        """Read device-port assignments: {key: port} where key is serial or tty"""
         config = {}
         if os.path.exists(CONFIG_FILE):
             try:
                 with open(CONFIG_FILE) as f:
                     for line in f:
                         if '=' in line and not line.strip().startswith('#'):
-                            tty, port = line.strip().split('=', 1)
-                            config[tty] = int(port)
+                            key, port = line.strip().split('=', 1)
+                            config[key] = int(port)
             except: pass
         return config
 
     def write_config(self, config):
-        """Write device-port assignments"""
+        """Write device-port assignments (keyed by serial number or tty)"""
         os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
         with open(CONFIG_FILE, 'w') as f:
-            f.write("# RFC2217 device-port assignments\n")
-            for tty, port in sorted(config.items(), key=lambda x: x[1]):
-                f.write(f"{tty}={port}\n")
+            f.write("# RFC2217 device-port assignments (by serial number or tty)\n")
+            for key, port in sorted(config.items(), key=lambda x: x[1]):
+                f.write(f"{key}={port}\n")
+
+    def normalize_serial(self, serial):
+        """Normalize serial number for use as config key (replace colons with underscores)"""
+        if not serial:
+            return ''
+        return serial.replace(':', '_').replace(' ', '_')
 
     def get_serial_devices(self):
         """Find all serial devices"""
@@ -300,24 +306,43 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except: pass
         return servers
 
-    def assign_port(self, tty, config):
-        """Assign a port to a device, reusing existing or finding next available"""
-        if tty in config:
-            return config[tty]
+    def assign_port(self, device_info, config):
+        """Assign a port to a device based on serial number (persistent) or tty (fallback)"""
+        tty = device_info['tty'] if isinstance(device_info, dict) else device_info
+        serial = self.normalize_serial(device_info.get('serial', '')) if isinstance(device_info, dict) else ''
 
+        # 1. Try serial number first (persistent across reconnects)
+        if serial and serial in config:
+            return config[serial]
+
+        # 2. Fallback to tty (legacy config entries)
+        if tty in config:
+            # Migrate: if we have serial, re-save with serial as key
+            if serial:
+                port = config[tty]
+                del config[tty]
+                config[serial] = port
+                self.write_config(config)
+            return config.get(serial, config.get(tty))
+
+        # 3. Assign next available port
         used_ports = set(config.values())
         port = RFC2217_BASE_PORT
         while port in used_ports:
             port += 1
 
-        config[tty] = port
+        # 4. Save with serial as key (preferred) or tty as fallback
+        key = serial if serial else tty
+        config[key] = port
         self.write_config(config)
         return port
 
     def start_server(self, tty):
         """Start serial proxy with logging for device"""
+        # Get device info for serial-based port assignment
+        device_info = self.get_device_info(tty)
         config = self.read_config()
-        port = self.assign_port(tty, config)
+        port = self.assign_port(device_info, config)
 
         # Check if already running
         running = self.get_running_servers()
@@ -391,9 +416,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.stop_server(tty)
         time.sleep(0.5)
 
-        # Get port assignment
+        # Get port assignment (using device info for serial-based lookup)
+        device_info = self.get_device_info(tty)
         config = self.read_config()
-        port = self.assign_port(tty, config)
+        port = self.assign_port(device_info, config)
 
         # Find esp_rfc2217_server
         server_paths = [
@@ -438,7 +464,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         result = []
         for d in devices:
             tty = d['tty']
-            port = self.assign_port(tty, config)
+            port = self.assign_port(d, config)  # Pass full device info for serial-based lookup
             result.append({
                 'tty': tty,
                 'product': d.get('product', ''),
@@ -575,8 +601,45 @@ def get_serial_devices_standalone():
             devices.append(tty)
     return devices
 
+def get_device_info_standalone(tty):
+    """Get device info from sysfs (standalone function)"""
+    info = {'tty': tty, 'product': '', 'serial': '', 'vendor': ''}
+    tty_name = os.path.basename(tty)
+    sysfs_path = f"/sys/class/tty/{tty_name}/device"
+
+    if not os.path.exists(sysfs_path):
+        return info
+
+    try:
+        device_path = os.path.realpath(sysfs_path)
+        for _ in range(5):
+            device_path = os.path.dirname(device_path)
+            product_file = os.path.join(device_path, 'product')
+            if os.path.exists(product_file):
+                break
+
+        for attr in ['product', 'serial', 'manufacturer']:
+            attr_file = os.path.join(device_path, attr)
+            if os.path.exists(attr_file):
+                try:
+                    with open(attr_file) as f:
+                        info[attr] = f.read().strip()
+                except: pass
+    except: pass
+    return info
+
+def normalize_serial_standalone(serial):
+    """Normalize serial number for use as config key"""
+    if not serial:
+        return ''
+    return serial.replace(':', '_').replace(' ', '_')
+
 def start_server_standalone(tty, config_file=CONFIG_FILE):
     """Start serial proxy with logging for device (standalone function)"""
+    # Get device info for serial-based port assignment
+    device_info = get_device_info_standalone(tty)
+    serial = normalize_serial_standalone(device_info.get('serial', ''))
+
     # Read config
     config = {}
     if os.path.exists(config_file):
@@ -584,25 +647,43 @@ def start_server_standalone(tty, config_file=CONFIG_FILE):
             with open(config_file) as f:
                 for line in f:
                     if '=' in line and not line.strip().startswith('#'):
-                        t, p = line.strip().split('=', 1)
-                        config[t] = int(p)
+                        key, p = line.strip().split('=', 1)
+                        config[key] = int(p)
         except: pass
 
-    # Assign port
-    if tty in config:
+    # Assign port (prefer serial number for persistence)
+    port = None
+    key = None
+
+    # 1. Try serial number first
+    if serial and serial in config:
+        port = config[serial]
+        key = serial
+    # 2. Fallback to tty (legacy)
+    elif tty in config:
         port = config[tty]
+        # Migrate to serial-based key
+        if serial:
+            del config[tty]
+            config[serial] = port
+            key = serial
+        else:
+            key = tty
+    # 3. Assign new port
     else:
         used_ports = set(config.values())
         port = RFC2217_BASE_PORT
         while port in used_ports:
             port += 1
-        config[tty] = port
-        # Save config
-        os.makedirs(os.path.dirname(config_file), exist_ok=True)
-        with open(config_file, 'w') as f:
-            f.write("# RFC2217 device-port assignments\n")
-            for t, p in sorted(config.items(), key=lambda x: x[1]):
-                f.write(f"{t}={p}\n")
+        key = serial if serial else tty
+        config[key] = port
+
+    # Save config
+    os.makedirs(os.path.dirname(config_file), exist_ok=True)
+    with open(config_file, 'w') as f:
+        f.write("# RFC2217 device-port assignments (by serial number or tty)\n")
+        for k, p in sorted(config.items(), key=lambda x: x[1]):
+            f.write(f"{k}={p}\n")
 
     # Check if already running
     try:

@@ -2,25 +2,25 @@
 # Starts RFC2217 server when device is plugged in
 
 # CP210x (Silicon Labs)
-ACTION=="add", SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", RUN+="/usr/local/bin/rfc2217-hotplug add %E{DEVNAME}"
-ACTION=="remove", SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", RUN+="/usr/local/bin/rfc2217-hotplug remove %E{DEVNAME}"
+ACTION=="add", SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", RUN+="/usr/local/bin/rfc2217-hotplug.sh add %E{DEVNAME}"
+ACTION=="remove", SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", RUN+="/usr/local/bin/rfc2217-hotplug.sh remove %E{DEVNAME}"
 
 # CH340/CH341 (QinHeng)
-ACTION=="add", SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", RUN+="/usr/local/bin/rfc2217-hotplug add %E{DEVNAME}"
-ACTION=="remove", SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", RUN+="/usr/local/bin/rfc2217-hotplug remove %E{DEVNAME}"
+ACTION=="add", SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", RUN+="/usr/local/bin/rfc2217-hotplug.sh add %E{DEVNAME}"
+ACTION=="remove", SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", RUN+="/usr/local/bin/rfc2217-hotplug.sh remove %E{DEVNAME}"
 
 # FTDI
-ACTION=="add", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", RUN+="/usr/local/bin/rfc2217-hotplug add %E{DEVNAME}"
-ACTION=="remove", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", RUN+="/usr/local/bin/rfc2217-hotplug remove %E{DEVNAME}"
+ACTION=="add", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", RUN+="/usr/local/bin/rfc2217-hotplug.sh add %E{DEVNAME}"
+ACTION=="remove", SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", RUN+="/usr/local/bin/rfc2217-hotplug.sh remove %E{DEVNAME}"
 
 # ESP32 native USB (Espressif)
-ACTION=="add", SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", RUN+="/usr/local/bin/rfc2217-hotplug add %E{DEVNAME}"
-ACTION=="remove", SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", RUN+="/usr/local/bin/rfc2217-hotplug remove %E{DEVNAME}"
+ACTION=="add", SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", RUN+="/usr/local/bin/rfc2217-hotplug.sh add %E{DEVNAME}"
+ACTION=="remove", SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", RUN+="/usr/local/bin/rfc2217-hotplug.sh remove %E{DEVNAME}"
 
 # Arduino (various)
-ACTION=="add", SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", RUN+="/usr/local/bin/rfc2217-hotplug add %E{DEVNAME}"
-ACTION=="remove", SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", RUN+="/usr/local/bin/rfc2217-hotplug remove %E{DEVNAME}"
+ACTION=="add", SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", RUN+="/usr/local/bin/rfc2217-hotplug.sh add %E{DEVNAME}"
+ACTION=="remove", SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", RUN+="/usr/local/bin/rfc2217-hotplug.sh remove %E{DEVNAME}"
 
 # Generic CDC-ACM (ttyACM devices)
-ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyACM*", RUN+="/usr/local/bin/rfc2217-hotplug add /dev/%k"
-ACTION=="remove", SUBSYSTEM=="tty", KERNEL=="ttyACM*", RUN+="/usr/local/bin/rfc2217-hotplug remove /dev/%k"
+ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyACM*", RUN+="/usr/local/bin/rfc2217-hotplug.sh add /dev/%k"
+ACTION=="remove", SUBSYSTEM=="tty", KERNEL=="ttyACM*", RUN+="/usr/local/bin/rfc2217-hotplug.sh remove /dev/%k"
