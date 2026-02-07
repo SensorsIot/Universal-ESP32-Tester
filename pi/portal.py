@@ -17,7 +17,9 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
+
+import wifi_controller
 
 PORT = 8080
 CONFIG_FILE = os.environ.get("RFC2217_CONFIG", "/etc/rfc2217/slots.json")
@@ -31,7 +33,7 @@ LOG_DIR = "/var/log/serial"
 # Module-level state
 slots: dict[str, dict] = {}
 seq_counter: int = 0
-host_ip: str = "127.0.0.1"
+host_ip: str = "127.0.0.1"  # refreshed periodically; see _refresh_host_ip()
 hostname: str = "localhost"
 
 
@@ -80,6 +82,19 @@ def get_host_ip() -> str:
         return ip
     except Exception:
         return "127.0.0.1"
+
+
+def _refresh_host_ip():
+    """Re-resolve host IP; update global and running slot URLs if it changed."""
+    global host_ip
+    new_ip = get_host_ip()
+    if new_ip != host_ip:
+        old = host_ip
+        host_ip = new_ip
+        for slot in slots.values():
+            if slot["running"] and slot["tcp_port"]:
+                slot["url"] = f"rfc2217://{host_ip}:{slot['tcp_port']}"
+        print(f"[portal] host_ip changed: {old} -> {host_ip}", flush=True)
 
 
 def get_hostname() -> str:
@@ -346,12 +361,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
 
         if path == "/api/devices":
             self._handle_get_devices()
         elif path == "/api/info":
             self._handle_get_info()
+        elif path == "/api/wifi/ping":
+            self._handle_wifi_ping()
+        elif path == "/api/wifi/mode":
+            self._handle_wifi_mode_get()
+        elif path == "/api/wifi/ap_status":
+            self._handle_wifi_ap_status()
+        elif path == "/api/wifi/scan":
+            self._handle_wifi_scan()
+        elif path == "/api/wifi/events":
+            qs = parse_qs(parsed.query)
+            self._handle_wifi_events(qs)
         elif path in ("/", "/index.html"):
             self._serve_ui()
         else:
@@ -366,12 +393,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_start()
         elif path == "/api/stop":
             self._handle_stop()
+        elif path == "/api/wifi/mode":
+            self._handle_wifi_mode_post()
+        elif path == "/api/wifi/ap_start":
+            self._handle_wifi_ap_start()
+        elif path == "/api/wifi/ap_stop":
+            self._handle_wifi_ap_stop()
+        elif path == "/api/wifi/sta_join":
+            self._handle_wifi_sta_join()
+        elif path == "/api/wifi/sta_leave":
+            self._handle_wifi_sta_leave()
+        elif path == "/api/wifi/http":
+            self._handle_wifi_http()
+        elif path == "/api/wifi/lease_event":
+            self._handle_wifi_lease_event()
         else:
             self._send_json({"error": "not found"}, 404)
 
     # -- handlers --
 
     def _handle_get_devices(self):
+        _refresh_host_ip()
         infos = []
         for slot in slots.values():
             _refresh_slot_health(slot)
@@ -379,6 +421,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._send_json({"slots": infos, "host_ip": host_ip, "hostname": hostname})
 
     def _handle_get_info(self):
+        _refresh_host_ip()
         self._send_json({
             "host_ip": host_ip,
             "hostname": hostname,
@@ -508,6 +551,133 @@ class Handler(http.server.BaseHTTPRequestHandler):
             stop_proxy(slot)
         self._send_json({"ok": True, "slot_key": slot_key, "running": False})
 
+    # -- WiFi handlers --
+
+    def _handle_wifi_ping(self):
+        self._send_json({"ok": True, **wifi_controller.ping()})
+
+    def _handle_wifi_mode_get(self):
+        self._send_json({"ok": True, **wifi_controller.get_mode()})
+
+    def _handle_wifi_mode_post(self):
+        body = self._read_json()
+        if body is None:
+            self._send_json({"ok": False, "error": "empty body"}, 400)
+            return
+        mode = body.get("mode")
+        if mode not in ("wifi-testing", "serial-interface"):
+            self._send_json({"ok": False, "error": "mode must be 'wifi-testing' or 'serial-interface'"}, 400)
+            return
+        ssid = body.get("ssid", "")
+        password = body.get("pass", "")
+        try:
+            result = wifi_controller.set_mode(mode, ssid, password)
+            self._send_json({"ok": True, **result})
+        except Exception as e:
+            self._send_json({"ok": False, "error": str(e)})
+
+    def _handle_wifi_ap_start(self):
+        body = self._read_json()
+        if body is None:
+            self._send_json({"ok": False, "error": "empty body"}, 400)
+            return
+        ssid = body.get("ssid")
+        if not ssid:
+            self._send_json({"ok": False, "error": "missing ssid"}, 400)
+            return
+        password = body.get("pass", "")
+        channel = body.get("channel", 6)
+        try:
+            result = wifi_controller.ap_start(ssid, password, channel)
+            self._send_json({"ok": True, **result})
+        except Exception as e:
+            self._send_json({"ok": False, "error": str(e)})
+
+    def _handle_wifi_ap_stop(self):
+        try:
+            wifi_controller.ap_stop()
+            self._send_json({"ok": True})
+        except Exception as e:
+            self._send_json({"ok": False, "error": str(e)})
+
+    def _handle_wifi_ap_status(self):
+        self._send_json({"ok": True, **wifi_controller.ap_status()})
+
+    def _handle_wifi_sta_join(self):
+        body = self._read_json()
+        if body is None:
+            self._send_json({"ok": False, "error": "empty body"}, 400)
+            return
+        ssid = body.get("ssid")
+        if not ssid:
+            self._send_json({"ok": False, "error": "missing ssid"}, 400)
+            return
+        password = body.get("pass", "")
+        timeout = body.get("timeout", 15)
+        try:
+            result = wifi_controller.sta_join(ssid, password, timeout)
+            self._send_json({"ok": True, **result})
+        except Exception as e:
+            self._send_json({"ok": False, "error": str(e)})
+
+    def _handle_wifi_sta_leave(self):
+        try:
+            wifi_controller.sta_leave()
+            self._send_json({"ok": True})
+        except Exception as e:
+            self._send_json({"ok": False, "error": str(e)})
+
+    def _handle_wifi_http(self):
+        body = self._read_json()
+        if body is None:
+            self._send_json({"ok": False, "error": "empty body"}, 400)
+            return
+        method = body.get("method", "GET")
+        url = body.get("url")
+        if not url:
+            self._send_json({"ok": False, "error": "missing url"}, 400)
+            return
+        headers = body.get("headers")
+        req_body = body.get("body")  # base64 encoded
+        timeout = body.get("timeout", 10)
+        try:
+            result = wifi_controller.http_relay(method, url, headers, req_body, timeout)
+            self._send_json({"ok": True, **result})
+        except Exception as e:
+            self._send_json({"ok": False, "error": str(e)})
+
+    def _handle_wifi_scan(self):
+        try:
+            result = wifi_controller.scan()
+            self._send_json({"ok": True, **result})
+        except Exception as e:
+            self._send_json({"ok": False, "error": str(e)})
+
+    def _handle_wifi_events(self, qs):
+        timeout = 0
+        if "timeout" in qs:
+            try:
+                timeout = float(qs["timeout"][0])
+            except (ValueError, IndexError):
+                pass
+        events = wifi_controller.get_events(timeout)
+        self._send_json({"ok": True, "events": events})
+
+    def _handle_wifi_lease_event(self):
+        body = self._read_json()
+        if body is None:
+            self._send_json({"ok": False, "error": "empty body"}, 400)
+            return
+        action = body.get("action", "")
+        mac = body.get("mac", "")
+        ip = body.get("ip", "")
+        hostname = body.get("hostname", "")
+        if not action or not mac:
+            self._send_json({"ok": False, "error": "missing action or mac"}, 400)
+            return
+        wifi_controller.handle_lease_event(action, mac, ip, hostname)
+        self._send_json({"ok": True})
+
     def _serve_ui(self):
         html = _UI_HTML
         body = html.encode()
@@ -535,6 +705,7 @@ _UI_HTML = """\
             padding: 20px;
         }
         h1 { text-align: center; margin-bottom: 30px; color: #00d4ff; }
+        h2 { color: #00d4ff; margin: 30px 0 15px; text-align: center; }
         .slots {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
@@ -571,15 +742,61 @@ _UI_HTML = """\
         .copied { background: #00d4ff !important; color: #1a1a2e !important; }
         .error { color: #ff6b6b; font-size: 0.85em; margin-top: 10px; }
         .info { text-align: center; color: #666; margin-top: 30px; font-size: 0.85em; }
+        /* WiFi Tester section */
+        .wifi-section {
+            max-width: 1000px; margin: 20px auto 0;
+            background: #16213e; border-radius: 12px; padding: 20px;
+            border: 2px solid #0f3460;
+        }
+        .wifi-section.active { border-color: #00d4ff; box-shadow: 0 0 20px rgba(0,212,255,0.2); }
+        .mode-toggle {
+            display: flex; gap: 0; margin-bottom: 20px;
+            border-radius: 8px; overflow: hidden; border: 1px solid #0f3460;
+        }
+        .mode-btn {
+            flex: 1; padding: 10px 15px; border: none;
+            background: #0f3460; color: #aaa; cursor: pointer;
+            font-size: 0.95em; font-weight: bold; transition: all 0.2s;
+        }
+        .mode-btn.active { background: #00d4ff; color: #1a1a2e; }
+        .mode-btn:hover:not(.active) { background: #1a4a7a; color: #eee; }
+        .wifi-status { font-size: 0.9em; color: #aaa; }
+        .wifi-status div { margin: 5px 0; }
+        .wifi-status span { color: #00d4ff; font-family: monospace; }
+        .wifi-form { margin-top: 15px; }
+        .wifi-form input {
+            background: #0f3460; border: 1px solid #333; color: #eee;
+            padding: 8px 12px; border-radius: 6px; margin-right: 8px;
+            font-size: 0.9em; width: 180px;
+        }
+        .wifi-form button {
+            background: #00d4ff; color: #1a1a2e; border: none;
+            padding: 8px 20px; border-radius: 6px; cursor: pointer;
+            font-weight: bold; font-size: 0.9em;
+        }
+        .wifi-form button:hover { background: #00b8d9; }
+        .wifi-form button:disabled { background: #555; color: #888; cursor: not-allowed; }
     </style>
 </head>
 <body>
     <h1 id="title">RFC2217 Serial Portal</h1>
     <div class="slots" id="slots"></div>
+    <h2>WiFi Tester</h2>
+    <div class="wifi-section" id="wifi-section">
+        <div class="mode-toggle">
+            <button class="mode-btn active" id="btn-wifi-testing"
+                    onclick="switchMode('wifi-testing')">WiFi-Testing</button>
+            <button class="mode-btn" id="btn-serial-interface"
+                    onclick="switchMode('serial-interface')">Serial Interface</button>
+        </div>
+        <div id="wifi-content"></div>
+    </div>
     <div class="info" id="info">Auto-refresh every 2 seconds</div>
 <script>
 let hostName = '';
 let hostIp = '';
+let currentMode = 'wifi-testing';
+let switching = false;
 
 async function fetchDevices() {
     try {
@@ -588,14 +805,31 @@ async function fetchDevices() {
         hostName = data.hostname || '';
         hostIp = data.host_ip || '';
         if (hostName) {
-            document.getElementById('title').textContent = hostName + ' — RFC2217 Serial Portal';
-            document.title = hostName + ' — RFC2217 Serial Portal';
+            document.getElementById('title').textContent = hostName + ' — Serial Portal';
+            document.title = hostName + ' — Serial Portal';
         }
         renderSlots(data.slots);
+    } catch (e) {
+        console.error('Error fetching devices:', e);
+    }
+}
+
+async function fetchWifi() {
+    try {
+        const [modeResp, apResp] = await Promise.all([
+            fetch('/api/wifi/mode'),
+            fetch('/api/wifi/ap_status')
+        ]);
+        const modeData = await modeResp.json();
+        const apData = await apResp.json();
+        if (!switching) {
+            currentMode = modeData.mode || 'wifi-testing';
+            renderWifi(modeData, apData);
+        }
         document.getElementById('info').textContent =
             'Hostname: ' + hostName + '  |  IP: ' + hostIp + '  |  Auto-refresh every 2s';
     } catch (e) {
-        console.error('Error fetching devices:', e);
+        console.error('Error fetching wifi:', e);
     }
 }
 
@@ -638,6 +872,84 @@ function renderSlots(slots) {
     }).join('');
 }
 
+function renderWifi(modeData, apData) {
+    const section = document.getElementById('wifi-section');
+    const btnWT = document.getElementById('btn-wifi-testing');
+    const btnSI = document.getElementById('btn-serial-interface');
+    const content = document.getElementById('wifi-content');
+
+    const mode = modeData.mode || 'wifi-testing';
+    btnWT.className = 'mode-btn' + (mode === 'wifi-testing' ? ' active' : '');
+    btnSI.className = 'mode-btn' + (mode === 'serial-interface' ? ' active' : '');
+
+    if (mode === 'wifi-testing') {
+        section.className = 'wifi-section' + (apData.active ? ' active' : '');
+        let html = '<div class="wifi-status">';
+        html += '<div>Mode: <span>WiFi-Testing</span> (wlan0 = test instrument)</div>';
+        if (apData.active) {
+            html += '<div>AP: <span>' + apData.ssid + '</span> (channel ' + apData.channel + ')</div>';
+            const cnt = apData.stations ? apData.stations.length : 0;
+            html += '<div>Stations: <span>' + cnt + '</span></div>';
+        } else {
+            html += '<div>AP: <span style="color:#666">inactive</span></div>';
+        }
+        html += '</div>';
+        content.innerHTML = html;
+    } else {
+        section.className = 'wifi-section active';
+        let html = '<div class="wifi-status">';
+        html += '<div>Mode: <span>Serial Interface</span> (wlan0 = LAN, WiFi testing disabled)</div>';
+        if (modeData.ssid) {
+            html += '<div>Connected: <span>' + modeData.ssid + '</span>';
+            if (modeData.ip) html += ' (' + modeData.ip + ')';
+            html += '</div>';
+        }
+        html += '</div>';
+        content.innerHTML = html;
+    }
+}
+
+async function switchMode(mode) {
+    if (switching || mode === currentMode) return;
+    if (mode === 'serial-interface') {
+        const ssid = prompt('WiFi SSID to connect:');
+        if (!ssid) return;
+        const pass = prompt('WiFi password (leave empty for open):') || '';
+        switching = true;
+        document.getElementById('btn-serial-interface').textContent = 'Switching...';
+        try {
+            const resp = await fetch('/api/wifi/mode', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({mode: 'serial-interface', ssid: ssid, pass: pass})
+            });
+            const data = await resp.json();
+            if (!data.ok) alert('Error: ' + data.error);
+        } catch (e) {
+            alert('Error switching mode: ' + e);
+        }
+        switching = false;
+        document.getElementById('btn-serial-interface').textContent = 'Serial Interface';
+    } else {
+        switching = true;
+        document.getElementById('btn-wifi-testing').textContent = 'Switching...';
+        try {
+            const resp = await fetch('/api/wifi/mode', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({mode: 'wifi-testing'})
+            });
+            const data = await resp.json();
+            if (!data.ok) alert('Error: ' + data.error);
+        } catch (e) {
+            alert('Error switching mode: ' + e);
+        }
+        switching = false;
+        document.getElementById('btn-wifi-testing').textContent = 'WiFi-Testing';
+    }
+    fetchWifi();
+}
+
 function copyUrl(url, el) {
     navigator.clipboard.writeText(url);
     el.classList.add('copied');
@@ -645,8 +957,11 @@ function copyUrl(url, el) {
     setTimeout(() => { el.classList.remove('copied'); el.textContent = url; }, 1000);
 }
 
-fetchDevices();
-setInterval(fetchDevices, 2000);
+async function refresh() {
+    await Promise.all([fetchDevices(), fetchWifi()]);
+}
+refresh();
+setInterval(refresh, 2000);
 </script>
 </body>
 </html>
@@ -686,6 +1001,7 @@ def main():
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("[portal] shutting down", flush=True)
+        wifi_controller.shutdown()
         # Stop all running proxies
         for slot in slots.values():
             if slot["running"] and slot["pid"]:
