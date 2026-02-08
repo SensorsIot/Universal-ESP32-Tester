@@ -344,12 +344,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _send_json(self, data, status=200):
         body = json.dumps(data).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Content-Length", len(body))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", len(body))
+            self.end_headers()
+            self.wfile.write(body)
+        except BrokenPipeError:
+            pass  # Client disconnected before reading response
 
     def _read_json(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -539,8 +542,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif action == "remove":
             slot["present"] = False
             if configured and slot["running"]:
-                with lock:
-                    stop_proxy(slot)
+                def _bg_stop(s=slot, lk=lock):
+                    with lk:
+                        stop_proxy(s)
+                threading.Thread(target=_bg_stop, daemon=True).start()
 
         print(
             f"[portal] hotplug: {action} slot_key={slot_key} "

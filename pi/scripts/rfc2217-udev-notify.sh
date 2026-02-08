@@ -9,7 +9,7 @@ DEVNAME="$2"
 ID_PATH="$3"
 DEVPATH="$4"
 
-curl -m 2 -s -X POST http://127.0.0.1:8080/api/hotplug \
+curl -m 10 -s -X POST http://127.0.0.1:8080/api/hotplug \
   -H 'Content-Type: application/json' \
   -d "{\"action\":\"$ACTION\",\"devnode\":\"$DEVNAME\",\"id_path\":\"${ID_PATH:-}\",\"devpath\":\"$DEVPATH\"}" \
   || true
