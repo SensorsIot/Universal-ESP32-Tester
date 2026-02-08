@@ -249,7 +249,8 @@ Configuration file: `/etc/rfc2217/slots.json`
       "last_action": "add",
       "last_event_ts": "2026-02-05T12:34:56+00:00",
       "last_error": null,
-      "flapping": false
+      "flapping": false,
+      "state": "idle"
     }
   ],
   "host_ip": "192.168.0.87",

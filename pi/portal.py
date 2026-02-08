@@ -35,6 +35,13 @@ FLAP_COOLDOWN_S = 30      # After flapping, wait 30s of quiet before retry
 # the USB-Serial/JTAG controller's auto-download if the chip is still in early boot)
 NATIVE_USB_BOOT_DELAY_S = 2
 
+# Slot states (per-slot lifecycle, exposed in /api/devices)
+STATE_ABSENT     = "absent"
+STATE_IDLE       = "idle"
+STATE_RESETTING  = "resetting"
+STATE_MONITORING = "monitoring"
+STATE_FLAPPING   = "flapping"
+
 # Module-level state
 slots: dict[str, dict] = {}
 seq_counter: int = 0
@@ -84,6 +91,7 @@ def load_config(path: str) -> dict[str, dict]:
                 "url": None,
                 "last_error": None,
                 "flapping": False,
+                "state": STATE_ABSENT,
                 "_event_times": [],
                 "_lock": threading.Lock(),
             }
@@ -227,6 +235,7 @@ def start_proxy(slot: dict) -> bool:
             slot["pid"] = proc.pid
             slot["last_error"] = None
             slot["url"] = f"rfc2217://{host_ip}:{tcp_port}"
+            slot["state"] = STATE_IDLE
             print(
                 f"[portal] {label}: proxy started (pid {proc.pid}, port {tcp_port})",
                 flush=True,
@@ -288,6 +297,7 @@ def _make_dynamic_slot(slot_key: str) -> dict:
         "url": None,
         "last_error": None,
         "flapping": False,
+        "state": STATE_ABSENT,
         "_event_times": [],
         "_lock": threading.Lock(),
     }
@@ -339,6 +349,7 @@ def scan_existing_devices():
         slot = slots[slot_key]
         slot["present"] = True
         slot["devnode"] = devnode
+        slot["state"] = STATE_IDLE
 
         if slot["tcp_port"] is not None and not slot["running"]:
             print(f"[portal] boot scan: starting proxy for {slot['label']} ({devnode})", flush=True)
@@ -354,6 +365,7 @@ def _refresh_slot_health(slot: dict):
             slot["pid"] = None
             slot["url"] = None
             slot["last_error"] = "Process died"
+            slot["state"] = STATE_IDLE if slot["present"] else STATE_ABSENT
 
 
 def _slot_info(slot: dict) -> dict:
@@ -428,6 +440,7 @@ def serial_reset(slot: dict) -> dict:
     # Stop the proxy so we can open direct serial
     with slot["_lock"]:
         stop_proxy(slot)
+        slot["state"] = STATE_RESETTING
 
     # Open direct serial with DTR/RTS safe
     try:
@@ -437,6 +450,7 @@ def serial_reset(slot: dict) -> dict:
         time.sleep(0.1)
         ser.read(8192)  # drain
     except Exception as e:
+        slot["state"] = STATE_IDLE if slot["present"] else STATE_ABSENT
         return {"ok": False, "error": f"Cannot open {devnode}: {e}"}
 
     # Send DTR/RTS reset pulse
@@ -458,6 +472,9 @@ def serial_reset(slot: dict) -> dict:
     with slot["_lock"]:
         if not slot["running"]:
             start_proxy(slot)
+        # start_proxy sets STATE_IDLE on success; set it here if proxy failed
+        if slot["state"] == STATE_RESETTING:
+            slot["state"] = STATE_IDLE if slot["present"] else STATE_ABSENT
 
     return {"ok": True, "output": lines}
 
@@ -489,6 +506,7 @@ def serial_monitor(slot: dict, pattern: str | None = None,
     except Exception as e:
         return {"ok": False, "error": f"Cannot connect to {rfc2217_url}: {e}"}
 
+    slot["state"] = STATE_MONITORING
     try:
         lines, matched_line = _read_serial_lines(ser, pattern, timeout)
     finally:
@@ -496,6 +514,7 @@ def serial_monitor(slot: dict, pattern: str | None = None,
             ser.close()
         except Exception:
             pass
+        slot["state"] = STATE_IDLE if slot["present"] else STATE_ABSENT
 
     return {
         "ok": True,
@@ -561,6 +580,7 @@ def _do_enter_portal(slot: dict, num_resets: int = 3):
     # Stop proxy so we can use direct serial for rapid resets
     with slot["_lock"]:
         stop_proxy(slot)
+        slot["state"] = STATE_RESETTING
 
     # -- Open direct serial (not RFC2217) --
     log_activity(f"Opening {label} direct serial ({devnode})...", "step")
@@ -572,6 +592,7 @@ def _do_enter_portal(slot: dict, num_resets: int = 3):
         ser.read(8192)  # drain
     except Exception as e:
         log_activity(f"Cannot open {devnode}: {e}", "error")
+        slot["state"] = STATE_IDLE if slot["present"] else STATE_ABSENT
         return
 
     # -- Step 1: clean boot (reset boot counter) --
@@ -598,6 +619,7 @@ def _do_enter_portal(slot: dict, num_resets: int = 3):
         else:
             log_activity(f"Reset {i}/{num_resets} — no boot count detected", "error")
             ser.close()
+            slot["state"] = STATE_IDLE if slot["present"] else STATE_ABSENT
             return
 
         if i < num_resets:
@@ -626,6 +648,7 @@ def _do_enter_portal(slot: dict, num_resets: int = 3):
             log_activity(f"{label} — portal mode not detected", "error")
 
     ser.close()
+    slot["state"] = STATE_IDLE if slot["present"] else STATE_ABSENT
 
 
 # ---------------------------------------------------------------------------
@@ -794,17 +817,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # All previous events aged out of window — quiet for >= FLAP_WINDOW_S
                 slot["flapping"] = False
                 slot["last_error"] = None
+                slot["state"] = STATE_IDLE if slot["present"] else STATE_ABSENT
                 print(f'[portal] {label}: USB flapping cleared (events aged out)', flush=True)
             else:
                 gap = slot["_event_times"][-1] - slot["_event_times"][-2]
                 if gap >= FLAP_COOLDOWN_S:
                     slot["flapping"] = False
                     slot["last_error"] = None
+                    slot["state"] = STATE_IDLE if slot["present"] else STATE_ABSENT
                     print(f'[portal] {label}: USB flapping cleared (quiet for {gap:.0f}s)', flush=True)
 
         # Detect new flapping
         if not slot["flapping"] and len(slot["_event_times"]) >= FLAP_THRESHOLD:
             slot["flapping"] = True
+            slot["state"] = STATE_FLAPPING
             slot["last_error"] = "USB flapping detected — device is connect/disconnect cycling"
             print(f'[portal] {label}: USB flapping detected ({len(slot["_event_times"])} events in {FLAP_WINDOW_S}s)', flush=True)
             # Stop proxy proactively if running
@@ -816,6 +842,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if action == "add":
             slot["present"] = True
             slot["devnode"] = devnode
+            if not slot["flapping"]:
+                slot["state"] = STATE_IDLE
 
             if slot["flapping"]:
                 pass  # No proxy start; UI shows warning
@@ -847,6 +875,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif action == "remove":
             slot["present"] = False
+            slot["state"] = STATE_ABSENT
             if configured and slot["running"]:
                 def _bg_stop(s=slot, lk=lock):
                     with lk:
@@ -894,6 +923,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             slot["devnode"] = devnode
             slot["present"] = True
             ok = start_proxy(slot)
+            # start_proxy sets STATE_IDLE on success; ensure idle on failure too
+            if not ok and slot["state"] not in (STATE_IDLE, STATE_FLAPPING):
+                slot["state"] = STATE_IDLE
         self._send_json({"ok": ok, "slot_key": slot_key, "running": slot["running"]})
 
     def _handle_stop(self):
@@ -914,6 +946,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         slot = slots[slot_key]
         with slot["_lock"]:
             stop_proxy(slot)
+            slot["state"] = STATE_IDLE if slot["present"] else STATE_ABSENT
         self._send_json({"ok": True, "slot_key": slot_key, "running": False})
 
     # -- WiFi handlers --
@@ -1190,8 +1223,12 @@ _UI_HTML = """\
             background: #16213e; border-radius: 12px; padding: 20px;
             border: 2px solid #0f3460; transition: all 0.3s;
         }
+        .slot.idle { border-color: #00d4ff; box-shadow: 0 0 20px rgba(0,212,255,0.2); }
         .slot.running { border-color: #00d4ff; box-shadow: 0 0 20px rgba(0,212,255,0.2); }
+        .slot.resetting { border-color: #e67e22; box-shadow: 0 0 20px rgba(230,126,34,0.2); }
+        .slot.monitoring { border-color: #9b59b6; box-shadow: 0 0 20px rgba(155,89,182,0.2); }
         .slot.flapping { border-color: #e74c3c; background: #1a0000; }
+        .slot.absent { border-color: #333; }
         .slot.present { border-color: #555; }
         .slot-header {
             display: flex; justify-content: space-between;
@@ -1202,8 +1239,12 @@ _UI_HTML = """\
             padding: 4px 12px; border-radius: 20px;
             font-size: 0.85em; font-weight: bold;
         }
+        .status.idle { background: #00d4ff; color: #1a1a2e; }
         .status.running { background: #00d4ff; color: #1a1a2e; }
+        .status.resetting { background: #e67e22; color: #fff; }
+        .status.monitoring { background: #9b59b6; color: #fff; }
         .status.flapping { background: #e74c3c; color: #fff; }
+        .status.absent { background: #333; color: #666; }
         .status.present { background: #555; color: #ccc; }
         .status.stopped { background: #333; color: #666; }
         .slot-info { font-size: 0.9em; color: #aaa; margin-bottom: 15px; }
@@ -1355,16 +1396,16 @@ async function fetchWifi() {
 }
 
 function slotStatus(s) {
+    if (s.state) return s.state;
+    // Fallback for older portal without state field
     if (s.flapping) return 'flapping';
-    if (s.running) return 'running';
-    if (s.present) return 'present';
-    return 'stopped';
+    if (s.running) return 'idle';
+    if (s.present) return 'idle';
+    return 'absent';
 }
 function statusLabel(s) {
-    if (s.flapping) return 'FLAPPING';
-    if (s.running) return 'RUNNING';
-    if (s.present) return 'PRESENT';
-    return 'EMPTY';
+    const st = slotStatus(s);
+    return st.toUpperCase();
 }
 
 function renderSlots(slots) {
@@ -1385,9 +1426,9 @@ function renderSlots(slots) {
                 <div>Device: <span>${s.devnode || 'None'}</span></div>
                 ${s.pid ? '<div>PID: <span>' + s.pid + '</span></div>' : ''}
             </div>
-            <div class="url-box ${s.running ? '' : 'empty'}"
-                 onclick="${s.running ? "copyUrl('" + copyTarget + "',this)" : ''}">
-                ${s.running ? ipUrl : (s.present ? 'Device present, proxy not running' : 'No device connected')}
+            <div class="url-box ${s.running || st === 'idle' ? '' : 'empty'}"
+                 onclick="${s.running || st === 'idle' ? "copyUrl('" + copyTarget + "',this)" : ''}">
+                ${s.running || st === 'idle' ? ipUrl || 'Proxy running' : (s.present || st === 'resetting' || st === 'monitoring' ? 'Device present, proxy not running' : 'No device connected')}
             </div>
             ${s.last_error ? '<div class="error">Error: ' + s.last_error + '</div>' : ''}
             ${s.flapping ? '<div class="flap-warning">&#9888; Device is boot-looping (rapid USB connect/disconnect). Proxy start suppressed until device stabilises.</div>' : ''}

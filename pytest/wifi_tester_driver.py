@@ -260,3 +260,85 @@ class WiFiTesterDriver:
 
     def reset(self) -> None:
         """No-op for Pi backend (no hardware to reset)."""
+
+    # ── Serial service ────────────────────────────────────────────
+
+    def get_devices(self) -> list[dict]:
+        """GET /api/devices — returns list of slot dicts."""
+        url = f"{self.base_url}/api/devices"
+        req = urllib.request.Request(url)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read())
+        except Exception as e:
+            raise CommandTimeout(f"GET /api/devices: {e}")
+        return data.get("slots", [])
+
+    def get_slot(self, label: str) -> dict:
+        """Find slot by label in /api/devices response."""
+        slots = self.get_devices()
+        for s in slots:
+            if s.get("label") == label:
+                return s
+        raise CommandError("get_slot", {"error": f"slot '{label}' not found"})
+
+    def serial_reset(self, slot: str = "SLOT2") -> dict:
+        """POST /api/serial/reset — returns {ok, output}."""
+        result = self._api_post(
+            "/api/serial/reset", {"slot": slot}, timeout=30
+        )
+        return {k: v for k, v in result.items() if k != "ok"}
+
+    def serial_monitor(self, slot: str = "SLOT2",
+                       pattern: Optional[str] = None,
+                       timeout: float = 10) -> dict:
+        """POST /api/serial/monitor — returns {ok, matched, line, output}."""
+        body: dict = {"slot": slot, "timeout": timeout}
+        if pattern is not None:
+            body["pattern"] = pattern
+        result = self._api_post(
+            "/api/serial/monitor", body, timeout=timeout + 5
+        )
+        return {k: v for k, v in result.items() if k != "ok"}
+
+    def enter_portal(self, slot: str = "SLOT2",
+                     resets: int = 3) -> dict:
+        """POST /api/enter-portal — starts background portal trigger."""
+        result = self._api_post(
+            "/api/enter-portal", {"slot": slot, "resets": resets}, timeout=10
+        )
+        return {k: v for k, v in result.items() if k != "ok"}
+
+    def wait_for_state(self, slot_label: str, state: str,
+                       timeout: float = 30,
+                       poll_interval: float = 1) -> dict:
+        """Poll /api/devices until slot reaches target state or timeout."""
+        deadline = time.monotonic() + timeout
+        last_slot = None
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                current = last_slot.get("state", "?") if last_slot else "?"
+                raise TimeoutError(
+                    f"Slot '{slot_label}' did not reach state "
+                    f"'{state}' within {timeout}s (current: {current})"
+                )
+            try:
+                slots = self.get_devices()
+                for s in slots:
+                    if s.get("label") == slot_label:
+                        last_slot = s
+                        if s.get("state") == state:
+                            return s
+                        break
+            except (CommandTimeout, CommandError):
+                pass
+            time.sleep(min(poll_interval, max(remaining, 0)))
+
+    def get_log(self, since: Optional[str] = None) -> list[dict]:
+        """GET /api/log — returns activity log entries."""
+        path = "/api/log"
+        if since:
+            path += f"?since={since}"
+        result = self._api_get(path, timeout=10)
+        return result.get("entries", [])
