@@ -71,27 +71,39 @@ import gpiod
 _gpio_lock = threading.Lock()
 _gpio_chip = None       # gpiod.Chip, opened lazily
 _gpio_requests = {}     # pin -> gpiod.LineRequest
+_gpio_directions = {}   # pin -> "output" | "input"
 GPIO_ALLOWED = {5, 6, 12, 13, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26}
 
 
 def _gpio_set(pin, value):
-    """Set a GPIO pin: value=0 (low), 1 (high), or "z" (release to input/high-Z)."""
+    """Set a GPIO pin: value=0 (low), 1 (high), or "z" (input with pull-up)."""
     global _gpio_chip
     with _gpio_lock:
         if _gpio_chip is None:
             _gpio_chip = gpiod.Chip("/dev/gpiochip0")
 
         if value == "z":
-            # Release line back to input (high-Z)
+            # Switch to input with pull-up (not floating)
             if pin in _gpio_requests:
                 _gpio_requests[pin].release()
                 del _gpio_requests[pin]
+            _gpio_requests[pin] = _gpio_chip.request_lines(
+                consumer="serial-portal",
+                config={pin: gpiod.LineSettings(
+                    direction=gpiod.line.Direction.INPUT,
+                    bias=gpiod.line.Bias.PULL_UP,
+                )},
+            )
+            _gpio_directions[pin] = "input"
             return
 
         gval = gpiod.line.Value.ACTIVE if value else gpiod.line.Value.INACTIVE
 
-        # Request as output if not already
-        if pin not in _gpio_requests:
+        # Request as output if not already, or reconfigure if switching from input
+        if pin not in _gpio_requests or _gpio_directions.get(pin) == "input":
+            if pin in _gpio_requests:
+                _gpio_requests[pin].release()
+                del _gpio_requests[pin]
             _gpio_requests[pin] = _gpio_chip.request_lines(
                 consumer="serial-portal",
                 config={pin: gpiod.LineSettings(
@@ -101,6 +113,7 @@ def _gpio_set(pin, value):
             )
         else:
             _gpio_requests[pin].set_value(pin, gval)
+        _gpio_directions[pin] = "output"
 
 
 def log_activity(msg: str, cat: str = "info"):
@@ -1404,9 +1417,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             for pin, req in _gpio_requests.items():
                 try:
                     val = req.get_value(pin)
-                    pins[str(pin)] = {"direction": "output", "value": val.value}
+                    # Track direction from our own state
+                    direction = _gpio_directions.get(pin, "unknown")
+                    pins[str(pin)] = {"direction": direction, "value": val.value}
                 except Exception:
-                    pins[str(pin)] = {"direction": "output", "value": None}
+                    pins[str(pin)] = {"direction": "unknown", "value": None}
         self._send_json({"ok": True, "pins": pins})
 
     def _serve_ui(self):
