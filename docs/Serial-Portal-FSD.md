@@ -53,6 +53,7 @@ and reporting station events — all controlled over the same HTTP API.
 | USB Hub | 3-port hub connected to single USB port |
 | USB Ethernet adapter | eth0 — wired LAN for management and serial traffic |
 | Devices | ESP32, Arduino, or any USB serial device |
+| GPIO wiring | Pi GPIO 17 → DUT GPIO 2 (portal button, active LOW with internal pull-up) |
 
 ### 1.4 Operating Modes
 
@@ -600,6 +601,12 @@ serial-interface mode.
 | GET | /api/human/status | Check if a human interaction request is pending |
 | POST | /api/human/done | Operator confirms action complete (wakes blocked request) |
 | POST | /api/human/cancel | Operator or test script cancels request |
+| **GPIO** | | |
+| POST | /api/gpio/set | Drive a Pi GPIO pin low/high or release to input (FR-018) |
+| GET | /api/gpio/status | Read state of all actively driven GPIO pins (FR-018) |
+| **Test Progress** | | |
+| POST | /api/test/update | Push test session start, step, result, or end (FR-019) |
+| GET | /api/test/progress | Poll current test session state (FR-019) |
 | **Composite** | | |
 | GET | /api/log | Activity log (timestamped entries, filterable with `?since=`) |
 | POST | /api/enter-portal | Trigger DUT captive portal via serial reset/monitor sequence |
@@ -761,6 +768,113 @@ wt.human_interaction("Press the reset button and click Done", timeout=60)
 **Activity log:** Each request, confirmation, cancellation, and timeout is
 logged to the activity log.
 
+### FR-018 — GPIO Control
+
+Drive Pi GPIO pins from test scripts to control DUT hardware signals — for
+example, holding DUT GPIO 2 low during boot to trigger captive portal mode
+without requiring the rapid-reset approach or physical button presses.
+
+**Pin allowlist:** Only these Pi GPIO pins may be controlled:
+
+```
+{5, 6, 12, 13, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26}
+```
+
+Requests for pins outside this set return HTTP 400.
+
+**IMPORTANT — Always release pins when done:** GPIO pins must be released
+back to input (high-Z) after use by sending `value: "z"`.  Leaving a pin
+driven can interfere with DUT operation (e.g. holding GPIO 2 low permanently
+would prevent the DUT from ever entering normal boot mode).
+
+#### 18.1 Endpoints
+
+**`POST /api/gpio/set`** — Drive a GPIO pin or release it
+
+Request body:
+```json
+{"pin": 17, "value": 0}
+```
+
+| Field | Type | Required | Values | Description |
+|-------|------|----------|--------|-------------|
+| pin | int | Yes | See allowlist | Pi BCM GPIO pin number |
+| value | int/string | Yes | `0`, `1`, `"z"` | 0 = drive low, 1 = drive high, "z" = release to input (high-Z) |
+
+Response:
+```json
+{"ok": true, "pin": 17, "value": 0}
+```
+
+**`GET /api/gpio/status`** — Read state of all actively driven pins
+
+Response:
+```json
+{"ok": true, "pins": {"17": {"direction": "output", "value": 0}}}
+```
+
+Pins that have been released (value `"z"`) do not appear in the response.
+
+#### 18.2 Implementation
+
+- **Lazy init:** `gpiod.Chip("/dev/gpiochip0")` is opened on first use
+- **Thread-safe:** All GPIO operations are serialized via `_gpio_lock`
+- **gpiod v2 API:** Uses `gpiod.line.Direction.OUTPUT`,
+  `gpiod.line.Value.ACTIVE`/`INACTIVE`, `request_lines()`, `set_value()`,
+  `get_value()`, `release()`
+- **Resource management:** Releasing a pin (`"z"`) calls
+  `LineRequest.release()` and removes the pin from the active set
+
+#### 18.3 Captive Portal via GPIO
+
+GPIO control provides a deterministic alternative to the rapid-reset approach
+(`POST /api/enter-portal`) for triggering captive portal mode:
+
+1. `POST /api/gpio/set` `{"pin": 17, "value": 0}` — drive DUT GPIO 2 low
+2. `POST /api/serial/reset` `{"slot": "SLOT1"}` — reset the DUT; it boots
+   with GPIO 2 held low and enters captive portal mode
+3. Verify captive portal from the serial output returned by step 2
+   (look for `CAPTIVE PORTAL MODE TRIGGERED` or `AP Started:`)
+4. `POST /api/gpio/set` `{"pin": 17, "value": "z"}` — release immediately
+
+The `ok: true` response from `/api/gpio/set` confirms the pin is driven —
+there is no need to poll `/api/gpio/status` to verify.
+
+**Driver methods:**
+```python
+wt.gpio_set(17, 0)           # Drive DUT GPIO 2 low
+result = wt.serial_reset("SLOT1")  # Reset DUT — boots into portal mode
+# Check result["output"] for portal confirmation
+wt.gpio_set(17, "z")         # Release — ALWAYS do this when done
+```
+
+### FR-019 — Test Progress Tracking
+
+Test scripts can push live progress updates to the portal web UI so
+operators can monitor test execution without a terminal.
+
+**Endpoints:**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | /api/test/update | Push session start, step updates, results, or end |
+| GET | /api/test/progress | Poll current test session state |
+
+**Session lifecycle:**
+
+1. `POST /api/test/update` with `{spec, phase, total}` — start session
+2. `POST /api/test/update` with `{current: {id, name, step, manual}}` — update current test
+3. `POST /api/test/update` with `{result: {id, name, result, details}}` — record result (PASS/FAIL/SKIP)
+4. `POST /api/test/update` with `{end: true}` — end session
+
+**Driver methods:**
+```python
+wt.test_start("Modbus Proxy v1.4", "Integration", total=58)
+wt.test_step("TC-001", "WiFi Connect", "Joining AP...", manual=False)
+wt.test_result("TC-001", "WiFi Connect", "PASS")
+wt.test_end()
+```
+
 ---
 
 ## 5. Web Portal
@@ -784,9 +898,12 @@ The portal serves a single-page HTML UI at `GET /` (port 8080):
   border, shown when a test script posts a human interaction request.
   Displays the operator instruction text with Done and Cancel buttons.
   Polled via `GET /api/human/status` as part of the auto-refresh cycle.
+- **Test progress panel** — shown when a test session is active.  Displays
+  spec name, phase, progress bar, current test step, and completed results
+  (PASS/FAIL/SKIP with colour badges).  Polled via `GET /api/test/progress`.
 - **Auto-refresh** — every 2 seconds via `setInterval`, fetches
   `/api/devices`, `/api/wifi/mode`, `/api/wifi/ap_status`, `/api/log`,
-  and `/api/human/status`
+  `/api/human/status`, and `/api/test/progress`
 - **Title** — shows `{hostname} — Serial Portal` when hostname is available
 
 ---
@@ -902,6 +1019,17 @@ Add `--run-dut` to include tests that require a WiFi device under test.
 | WT-701 | Human interaction cancel | Human Interaction | No |
 | WT-702 | Human interaction timeout | Human Interaction | No |
 | WT-703 | Concurrent request rejected | Human Interaction | No |
+| WT-800 | GPIO set low | GPIO Control | No |
+| WT-801 | GPIO set high | GPIO Control | No |
+| WT-802 | GPIO release to input | GPIO Control | No |
+| WT-803 | GPIO status shows active pins | GPIO Control | No |
+| WT-804 | GPIO disallowed pin rejected | GPIO Control | No |
+| WT-805 | GPIO invalid value rejected | GPIO Control | No |
+| WT-806 | GPIO captive portal trigger | GPIO Control | Yes |
+| WT-900 | Test progress start session | Test Progress | No |
+| WT-901 | Test progress step update | Test Progress | No |
+| WT-902 | Test progress result recording | Test Progress | No |
+| WT-903 | Test progress end session | Test Progress | No |
 
 \* WT-503/504 require a running AP (wifi_network fixture) but not a physical DUT.
 
@@ -923,6 +1051,7 @@ Add `--run-dut` to include tests that require a WiFi device under test.
 | 5.2 | 2026-02-08 | Claude | Removed esp_rfc2217_server.py and serial_proxy.py (no longer installed); proxy auto-restart after esptool USB re-enumeration (background stop_proxy, BrokenPipeError fix, curl timeout 10s); FR-004 logging removed; updated deliverables |
 | 6.0 | 2026-02-08 | Claude | Service separation — Serial and WiFi as independent services with state models (§1.6); serial reset (FR-008) and serial monitor (FR-009) as first-class API operations; flapping recovery via active reset; WiFi section renamed to WiFi Service with states Idle/Captive/AP; enter-portal rewritten as composite serial operation; consolidated API table (FR-010) |
 | 6.1 | 2026-02-09 | Claude | Human interaction request (FR-017): blocking endpoint for test steps requiring physical operator actions; pulsing orange UI modal; ThreadingHTTPServer for concurrent requests; driver `human_interaction()` method; WT-700–703 test cases |
+| 6.2 | 2026-02-09 | Claude | GPIO control (FR-018): drive Pi GPIO pins from test scripts to control DUT hardware signals (e.g. hold GPIO 2 low during boot for captive portal trigger); pin allowlist, lazy gpiod init, release-to-input lifecycle; WT-800–806 test cases. Test progress tracking (FR-019): live test session updates pushed to web UI; WT-900–903 test cases |
 
 ---
 
@@ -1198,6 +1327,18 @@ Add this to /etc/rfc2217/slots.json:
 - [x] TASK-063: Switch to `ThreadingHTTPServer` for concurrent request handling
 - [x] TASK-064: Add `human_interaction()` method to `wifi_tester_driver.py`
 - [x] TASK-065: Add `Cache-Control: no-cache` to UI HTML response
+
+**GPIO Control (v6.2):**
+- [x] TASK-070: Implement `POST /api/gpio/set` with pin allowlist and gpiod v2 API (FR-018)
+- [x] TASK-071: Implement `GET /api/gpio/status` for active pin readback (FR-018)
+- [x] TASK-072: Add `gpio_set()` and `gpio_get()` methods to `wifi_tester_driver.py`
+- [ ] TASK-073: Implement WT-800–806 GPIO test cases in `test_instrument.py`
+
+**Test Progress (v6.2):**
+- [x] TASK-080: Implement `POST /api/test/update` and `GET /api/test/progress` (FR-019)
+- [x] TASK-081: Test progress panel in web UI (progress bar, current step, results)
+- [x] TASK-082: Add `test_start/step/result/end()` methods to `wifi_tester_driver.py`
+- [ ] TASK-083: Implement WT-900–903 test progress test cases
 
 ### C.2 Deliverables
 
