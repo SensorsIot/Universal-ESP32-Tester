@@ -1303,11 +1303,64 @@ The portal serves a single-page HTML UI at `GET /` (port 8080):
 | Duplicate events | Idempotency prevents flapping |
 | Unknown slot_key | Portal tracks the slot (present, seq) but does not start a proxy; logged for diagnostics |
 | Hub topology changed | Must re-learn slots and update config |
+| Dual-USB hub board | Board exposes onboard hub with JTAG + UART interfaces — occupies two slots (see §6.6) |
 | Device not ready | Settle checks with timeout, then fail with `last_error` |
 | ttyACM DTR trap | `wait_for_device()` skips `os.open()` for ttyACM; proxy uses controlled boot sequence (FR-006) |
 | Boot loop (USB flapping) | Flap detection suppresses proxy restarts; clears after cooldown (FR-007) |
 | ESP32-C3 stuck in download mode | Run esptool on Pi with `--after=watchdog-reset` to trigger system reset (FR-006.6) |
 | udev PrivateNetwork blocking curl | udev runs RUN+ handlers in a network-isolated sandbox (`PrivateNetwork=yes`). Direct `curl` to localhost silently fails. Fix: wrap the notify script with `systemd-run --no-block` in the udev rule so it runs outside the sandbox. |
+
+### 6.6 Dual-USB Hub Boards
+
+Some ESP32-S3 development boards contain an **onboard USB hub** that exposes
+two USB interfaces through a single cable:
+
+| Interface | USB ID | Purpose | Slot role |
+|-----------|--------|---------|-----------|
+| USB-Serial/JTAG | Espressif `303a:1001` | Flashing (esptool), DTR/RTS reset | **JTAG slot** |
+| USB-to-UART bridge | e.g. CH340 `1a86:55d3`, CP2102 `10c4:ea60` | UART0 console output | **UART slot** |
+
+These boards occupy **two slots** in the tester configuration because the hub
+presents two independent `ttyACM` (or `ttyUSB`) devices with distinct `ID_PATH`
+values.  Both paths share a common hub parent — e.g. `usb-0:1.1.2:1.0` and
+`usb-0:1.1.4:1.0` both descend from the hub at `usb-0:1.1`.
+
+**Identifying which slot is which:**
+
+```bash
+# On the Pi — check each ttyACM device:
+udevadm info -q property /dev/ttyACM0 | grep ID_SERIAL
+# "Espressif" → JTAG slot (flash via this slot's RFC2217 URL)
+# "1a86", "CH340", "CP210x" → UART slot (serial console output here)
+```
+
+**Operational rules for dual-USB hub boards:**
+
+1. **Flashing:** always use the JTAG slot's RFC2217 URL with esptool
+2. **Serial console (monitor/reset):** use the UART slot — this is where
+   `ESP_LOGI` output appears when `CONFIG_ESP_CONSOLE_UART_DEFAULT=y`
+3. **Serial reset via JTAG slot:** sends DTR/RTS signals through the
+   USB-Serial/JTAG controller, which triggers the onboard auto-download
+   circuit (reset + boot mode select).  This resets the chip but the
+   resulting boot output appears on the UART slot, not the JTAG slot
+4. **GPIO control:** these boards typically have GPIO0/EN connected to the
+   onboard auto-download circuit, so external Pi GPIO wiring for reset/boot
+   mode may not be needed — DTR/RTS on the JTAG slot suffices
+
+**Slot configuration example:**
+
+```json
+{
+  "slots": [
+    {"label": "SLOT1", "slot_key": "platform-3f980000.usb-usb-0:1.1.2:1.0", "tcp_port": 4001},
+    {"label": "SLOT2", "slot_key": "platform-3f980000.usb-usb-0:1.1.4:1.0", "tcp_port": 4002}
+  ]
+}
+```
+
+Where SLOT1 is the JTAG interface and SLOT2 is the UART bridge.  Label
+convention: append `-jtag` and `-uart` to the label when documenting for
+clarity.
 
 ---
 

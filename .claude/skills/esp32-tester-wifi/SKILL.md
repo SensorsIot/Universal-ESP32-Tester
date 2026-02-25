@@ -77,7 +77,7 @@ curl -X POST http://192.168.0.87:8080/api/enter-portal \
 
 2. **Test device WiFi connectivity:**
    - `POST /api/wifi/ap_start` — create AP for DUT
-   - Reset DUT via serial reset (see esp32-serial skill)
+   - Reset DUT via serial reset (see esp32-tester-serial). For dual-USB hub boards: reset via JTAG slot, monitor boot output on UART slot
    - `GET /api/wifi/events?timeout=30` — wait for DUT to connect
    - `POST /api/wifi/http` — relay HTTP to DUT's IP to verify it responds
 

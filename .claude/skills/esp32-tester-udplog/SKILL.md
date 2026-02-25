@@ -111,5 +111,5 @@ Each line is stored with timestamp + source IP. Buffer holds ~10000 lines.
 | No UDP logs appearing | Ensure firmware sends UDP to tester IP:5555; check WiFi connectivity |
 | Logs from wrong device | Use `source` query param to filter by IP |
 | Old/stale logs | Clear with `DELETE /api/udplog` before starting a test |
-| Need boot output | UDP logs don't capture boot — use serial monitor (esp32-tester-serial) |
+| Need boot output | UDP logs don't capture boot — use serial monitor (esp32-tester-serial). For dual-USB hub boards, monitor the UART slot (not the JTAG slot) |
 | Need pattern matching | Poll UDP logs manually; or use serial monitor which has built-in regex matching |

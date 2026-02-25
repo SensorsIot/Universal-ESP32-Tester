@@ -28,6 +28,14 @@ curl -s http://192.168.0.87:8080/api/info | jq .
 
 Record: slot label, TCP port, RFC2217 URL, device state.
 
+**Check for dual-USB hub boards:** If the board occupies two slots (onboard USB hub
+exposing both JTAG and UART), identify which slot is which:
+- Espressif USB-Serial/JTAG (`303a:1001`) → **JTAG slot** (flash here)
+- CH340/CP2102 UART bridge (`1a86:55d3` / `10c4:ea60`) → **UART slot** (console output here)
+
+Document both slots in the hardware connections table and note which is used for
+flashing vs serial monitoring.
+
 ### Step 3: Determine which tester capabilities apply
 
 Only include what the project actually needs to test:
@@ -50,6 +58,7 @@ Add a `## Testing with the ESP32 Tester` chapter to the FSD containing:
 
 Document actual wiring from Step 2:
 
+For single-USB boards (one slot):
 ```markdown
 ### Test Hardware
 
@@ -58,6 +67,18 @@ Document actual wiring from Step 2:
 | ESP32 USB | Tester slot <N>, serial at `rfc2217://192.168.0.87:<PORT>` |
 | Tester GPIO 17 | ESP32 EN/RST (hardware reset) |
 | Tester GPIO 18 | ESP32 boot-select |
+| ... | (project-specific connections) |
+```
+
+For dual-USB hub boards (two slots):
+```markdown
+### Test Hardware
+
+| What | Where |
+|------|-------|
+| ESP32 JTAG | Tester slot <N> (Espressif USB JTAG), `rfc2217://192.168.0.87:<PORT>` — flash here |
+| ESP32 UART | Tester slot <M> (CH340/UART bridge), `rfc2217://192.168.0.87:<PORT>` — serial console here |
+| Reset/Boot | Via DTR/RTS on JTAG slot (onboard auto-download circuit) |
 | ... | (project-specific connections) |
 ```
 
@@ -128,7 +149,7 @@ Add a table of test failures mapped to tester-based diagnostics:
 
 | Test failure | Diagnostic | Fix |
 |-------------|-----------|-----|
-| Serial monitor shows no output | Check `/api/devices` for slot state | Device may be absent or flapping |
+| Serial monitor shows no output | Check `/api/devices` for slot state | Device may be absent or flapping. For dual-USB boards: ensure you're monitoring the UART slot, not the JTAG slot |
 | OTA test fails | Check `/api/wifi/ap_status` | Device not on WiFi — provision first |
 | BLE test finds no device | Serial monitor for boot errors | Firmware may have crashed before BLE init |
 ```

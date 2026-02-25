@@ -30,6 +30,7 @@ Base URL: `http://192.168.0.87:8080`
 - Use **UDP logs** (see esp32-tester-udplog) if the firmware sends UDP log packets during OTA
 - Use **serial monitor** (see esp32-tester-serial) if the firmware prints OTA progress to UART
 - UDP logs are preferred (non-blocking); serial monitor blocks the slot
+- **Dual-USB hub boards:** serial monitor must use the **UART slot** (not the JTAG slot) — see esp32-tester-serial for details
 
 ## Endpoints
 

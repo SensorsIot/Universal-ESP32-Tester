@@ -58,6 +58,10 @@ curl http://192.168.0.87:8080/api/gpio/status
 2. **Simulate button press:**
    - Set pin LOW, wait, set pin to `"z"` to release
 
+## Note: Dual-USB Hub Boards
+
+Some ESP32-S3 dev boards have an onboard USB hub with a built-in auto-download circuit that connects GPIO0/EN to DTR/RTS on the USB-Serial/JTAG interface. For these boards, **external Pi GPIO wiring for reset and boot mode is not needed** — DTR/RTS on the JTAG slot handles it via `POST /api/serial/reset` on the JTAG slot. See esp32-tester-serial for identifying dual-USB boards.
+
 ## Troubleshooting
 
 | Problem | Fix |
@@ -65,3 +69,4 @@ curl http://192.168.0.87:8080/api/gpio/status
 | "pin not in allowed set" | Use only the BCM pins listed above |
 | "value must be 0, 1, or 'z'" | Pin must be integer; value must be `0`, `1`, or `"z"` |
 | Pin stays driven after test | Always release pins with `"z"` when done |
+| GPIO reset not needed | Board may have onboard auto-download circuit (dual-USB hub board) — use DTR/RTS via JTAG slot instead |

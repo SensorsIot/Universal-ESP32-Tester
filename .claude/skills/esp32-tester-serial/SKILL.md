@@ -36,15 +36,43 @@ Base URL: `http://192.168.0.87:8080`
 | POST | `/api/serial/reset` | Hardware reset via DTR/RTS pulse, returns boot output |
 | POST | `/api/serial/monitor` | Read serial output with optional pattern matching |
 
-## Step 1: Discover Devices
+## Step 1: Discover Devices and Determine Board Type
 
-Always start here. Get slot labels, states, and RFC2217 URLs:
+Always start here. This determines whether you have a single-USB or dual-USB board.
 
 ```bash
 curl -s http://192.168.0.87:8080/api/devices | jq .
 ```
 
 Response fields per slot: `label`, `state`, `url` (RFC2217), `present`, `running`.
+
+### Board type detection
+
+Count how many slots show `present: true`. Then determine the type:
+
+| Present slots | Board type | GPIO reset needed? | How to identify |
+|---------------|------------|-------------------|-----------------|
+| 1 slot | **Single-USB** | Yes — wire Pi GPIO 17→EN, GPIO 18→BOOT | One `ttyACM`/`ttyUSB` device; same slot for flash + monitor |
+| 2 slots (same hub parent) | **Dual-USB hub board** | No — onboard auto-download circuit | Two `ttyACM` devices under a common USB hub path |
+
+**For dual-USB boards**, you must identify which slot is which:
+
+```bash
+# SSH to tester — check the USB vendor for each present slot's devnode:
+ssh pi@192.168.0.87 "udevadm info -q property /dev/ttyACM0 | grep ID_SERIAL"
+# Contains "Espressif" → JTAG slot (flash + reset here)
+# Contains "1a86", "CH340", "CP210x" → UART slot (serial console here)
+```
+
+**Summary of slot roles:**
+
+| Operation | Single-USB board | Dual-USB board |
+|-----------|-----------------|----------------|
+| **Flash (esptool)** | The one slot | JTAG slot |
+| **Serial monitor** | The one slot | UART slot |
+| **Reset (DTR/RTS)** | The one slot (or Pi GPIO) | JTAG slot (auto-download circuit) |
+| **Boot output after reset** | The one slot | UART slot (NOT the JTAG slot!) |
+| **GPIO control needed?** | Yes (EN + BOOT pins) | No (handled by JTAG DTR/RTS) |
 
 ## Serial Reset
 
@@ -101,12 +129,37 @@ esptool.py --port "$SLOT_URL" --chip esp32c3 erase_region 0x9000 0x6000
 | `monitoring` | Monitor active | No | No (wait for current to finish) |
 | `flapping` | USB storm | No | No (wait 30s) |
 
+## Dual-USB Hub Board Reference
+
+These boards contain an onboard USB hub exposing two interfaces:
+
+| Interface | USB ID | Tester role |
+|-----------|--------|-------------|
+| Espressif USB-Serial/JTAG | `303a:1001` | **JTAG slot** — flash + reset |
+| CH340/CP2102 UART bridge | `1a86:55d3` / `10c4:ea60` | **UART slot** — serial console |
+
+### Workflow: reset + capture boot log on dual-USB board
+
+```bash
+# 1. Reset via JTAG slot (triggers auto-download circuit DTR/RTS reset)
+curl -X POST http://192.168.0.87:8080/api/serial/reset \
+  -H 'Content-Type: application/json' \
+  -d '{"slot": "<JTAG-slot>"}'
+
+# 2. Capture boot output from UART slot (where ESP_LOGI goes)
+curl -X POST http://192.168.0.87:8080/api/serial/monitor \
+  -H 'Content-Type: application/json' \
+  -d '{"slot": "<UART-slot>", "timeout": 10}'
+```
+
+**Key:** reset output on the JTAG slot will be empty or minimal — the actual boot log appears on the UART slot.
+
 ## Common Workflows
 
 1. **Flash a blank device:** `GET /api/devices` to find slot URL, then `esptool.py --port <url> write_flash ...`
-2. **Reset and read boot log:** `POST /api/serial/reset` — returns boot output lines
-3. **Wait for a specific message after reset:** reset first, then `POST /api/serial/monitor` with `pattern`
-4. **Flash then verify boot:** flash via esptool, then `POST /api/serial/reset`, check output for expected boot messages
+2. **Reset and read boot log:** `POST /api/serial/reset` — returns boot output lines. For dual-USB boards: reset via JTAG slot, monitor via UART slot
+3. **Wait for a specific message after reset:** reset first, then `POST /api/serial/monitor` with `pattern`. For dual-USB boards: monitor the UART slot
+4. **Flash then verify boot:** flash via esptool (JTAG slot), then reset + monitor (UART slot for dual-USB boards, same slot for single-USB boards)
 
 ## Troubleshooting
 
@@ -114,6 +167,8 @@ esptool.py --port "$SLOT_URL" --chip esp32c3 erase_region 0x9000 0x6000
 |---------|-----|
 | Slot shows `absent` | Check USB cable, re-seat device |
 | "proxy not running" | Device may be flapping — check `state` field |
-| Monitor timeout, no output | Baud rate is fixed at 115200; ensure device matches |
+| Monitor timeout, no output | Baud rate is fixed at 115200; ensure device matches. **For dual-USB boards:** console output goes to the UART slot, not the JTAG slot — make sure you're monitoring the right slot |
 | `flapping` state | USB connection cycling — wait 30s for cooldown |
 | esptool can't connect | Ensure slot is `idle`; may need to enter download mode via GPIO (see esp32-tester-gpio) |
+| Reset works but no boot output | On dual-USB boards, reset via JTAG slot but boot output appears on UART slot |
+| Board occupies two slots | Onboard USB hub — identify JTAG vs UART via `udevadm info` (see above) |
