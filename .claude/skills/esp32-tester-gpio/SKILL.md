@@ -11,7 +11,7 @@ Base URL: `http://192.168.0.87:8080`
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| POST | `/api/gpio/set` | Drive a pin: 0 (low), 1 (high), or "z" (hi-Z/release) |
+| POST | `/api/gpio/set` | Drive a pin: 0 (low) or 1 (high) |
 | GET | `/api/gpio/status` | Read state of all driven pins |
 
 ## Allowed BCM Pins
@@ -26,28 +26,30 @@ curl -X POST http://192.168.0.87:8080/api/gpio/set \
   -H 'Content-Type: application/json' \
   -d '{"pin": 18, "value": 0}'
 
-# Drive GPIO18 HIGH
+# Drive GPIO18 HIGH (release)
 curl -X POST http://192.168.0.87:8080/api/gpio/set \
   -H 'Content-Type: application/json' \
   -d '{"pin": 18, "value": 1}'
-
-# Release GPIO18 (hi-Z)
-curl -X POST http://192.168.0.87:8080/api/gpio/set \
-  -H 'Content-Type: application/json' \
-  -d '{"pin": 18, "value": "z"}'
 
 # Read all driven pin states
 curl http://192.168.0.87:8080/api/gpio/status
 ```
 
-## CRITICAL: Always Use HIGH (1) to Release Pins
+## Pin Mapping
 
-**Never use hi-Z (`"z"`) to release EN or BOOT pins.** Hi-Z leaves the pin
-floating, which can cause the Pi to crash or hang (the Pi Zero W's dwc_otg USB
-controller is sensitive to floating GPIO lines connected to ESP32 EN/BOOT).
+| Pi GPIO | ESP32 Pin | Function |
+|---------|-----------|----------|
+| GPIO17 | EN | **RST** — pull LOW to reset the ESP32 |
+| GPIO18 | GPIO0 | **BOOT** — hold LOW during reset to enter download mode |
 
-- **Release = drive HIGH (`1`)**, not hi-Z
-- Only use `"z"` after the full sequence is complete and you want to fully disconnect
+## CRITICAL: Never Use Hi-Z on EN or BOOT Pins
+
+**Never use `"z"` (hi-Z) on pins connected to ESP32 EN or BOOT.** Hi-Z leaves the
+pin floating, which crashes the Pi (the Pi Zero W's dwc_otg USB controller is
+sensitive to floating GPIO lines connected to ESP32 EN/BOOT).
+
+- **Release = drive HIGH (`1`)**
+- **Only use `0` (low) and `1` (high)** for EN and BOOT pins
 
 ## Common Workflows
 
@@ -68,16 +70,11 @@ controller is sensitive to floating GPIO lines connected to ESP32 EN/BOOT).
    # 4. Release BOOT HIGH
    curl -X POST http://192.168.0.87:8080/api/gpio/set \
      -H 'Content-Type: application/json' -d '{"pin": 18, "value": 1}'
-   # 5. (Optional) Release to hi-Z after sequence is stable
-   curl -X POST http://192.168.0.87:8080/api/gpio/set \
-     -H 'Content-Type: application/json' -d '{"pin": 17, "value": "z"}'
-   curl -X POST http://192.168.0.87:8080/api/gpio/set \
-     -H 'Content-Type: application/json' -d '{"pin": 18, "value": "z"}'
    ```
 
 2. **Normal reset** (without entering download mode):
    ```bash
-   # Pull EN LOW, wait, release HIGH
+   # Pull EN (GPIO17) LOW, wait, release HIGH
    curl -X POST http://192.168.0.87:8080/api/gpio/set \
      -H 'Content-Type: application/json' -d '{"pin": 17, "value": 0}'
    sleep 0.2
@@ -100,28 +97,23 @@ Not all boards have EN/BOOT pins wired to Pi GPIOs. Run this probe once per boar
 
 ```bash
 # Step 1: Try GPIO-based download mode entry
-# 1a. Hold BOOT low
+# 1a. Hold BOOT (GPIO18) LOW
 curl -X POST http://192.168.0.87:8080/api/gpio/set \
   -H 'Content-Type: application/json' -d '{"pin": 18, "value": 0}'
 sleep 1
-# 1b. Pull EN low (assert reset)
+# 1b. Pull EN (GPIO17) LOW — assert reset
 curl -X POST http://192.168.0.87:8080/api/gpio/set \
   -H 'Content-Type: application/json' -d '{"pin": 17, "value": 0}'
 sleep 0.2
-# 1c. Release EN HIGH (not hi-Z!) — ESP exits reset, samples BOOT
+# 1c. Release EN HIGH — ESP exits reset, samples BOOT=LOW
 curl -X POST http://192.168.0.87:8080/api/gpio/set \
   -H 'Content-Type: application/json' -d '{"pin": 17, "value": 1}'
 sleep 0.5
 # 1d. Release BOOT HIGH
 curl -X POST http://192.168.0.87:8080/api/gpio/set \
   -H 'Content-Type: application/json' -d '{"pin": 18, "value": 1}'
-# 1e. Release to hi-Z (safe now that sequence is complete)
-curl -X POST http://192.168.0.87:8080/api/gpio/set \
-  -H 'Content-Type: application/json' -d '{"pin": 17, "value": "z"}'
-curl -X POST http://192.168.0.87:8080/api/gpio/set \
-  -H 'Content-Type: application/json' -d '{"pin": 18, "value": "z"}'
 
-# 1f. Monitor for boot output (USB disconnect/reconnect = GPIO works)
+# 1e. Monitor for boot output (USB disconnect/reconnect = GPIO works)
 curl -X POST http://192.168.0.87:8080/api/serial/monitor \
   -H 'Content-Type: application/json' \
   -d '{"slot": "<slot>", "pattern": "boot:", "timeout": 3}'
@@ -130,10 +122,6 @@ curl -X POST http://192.168.0.87:8080/api/serial/monitor \
 curl -X POST http://192.168.0.87:8080/api/serial/reset \
   -H 'Content-Type: application/json' -d '{"slot": "<slot>"}'
 ```
-
-**IMPORTANT:** Always release EN and BOOT by driving HIGH (`1`) first, then
-optionally to hi-Z (`"z"`). Releasing directly to hi-Z leaves pins floating
-and can crash the Pi (dwc_otg USB controller sensitivity).
 
 ### Interpreting Results
 
@@ -154,7 +142,7 @@ and can crash the Pi (dwc_otg USB controller sensitivity).
 |---------|-----|
 | "pin not in allowed set" | Use only the BCM pins listed above |
 | "value must be 0, 1, or 'z'" | Pin must be integer; value must be `0`, `1`, or `"z"` |
-| Pin stays driven after test | Release pins with HIGH (`1`) first, then `"z"` when stable |
-| **Pi crashes during GPIO reset** | **Never release EN/BOOT directly to hi-Z.** Always drive HIGH first, then optionally hi-Z. Floating pins crash the Pi's dwc_otg USB controller. |
+| Pin stays driven after test | Drive pins HIGH (`1`) to release |
+| **Pi crashes during GPIO reset** | **Never use hi-Z (`"z"`) on EN or BOOT pins.** Only use LOW (`0`) and HIGH (`1`). Floating pins crash the Pi's dwc_otg USB controller. |
 | GPIO reset not needed | Board may have onboard auto-download circuit (dual-USB hub board) — use DTR/RTS via JTAG slot instead |
 | Probe shows crash loop output | Board is rebooting from firmware panic, not from GPIO. Erase flash first for clean probe. |

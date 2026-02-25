@@ -832,10 +832,10 @@ without requiring the rapid-reset approach or physical button presses.
 
 Requests for pins outside this set return HTTP 400.
 
-**IMPORTANT — Always release pins when done:** GPIO pins must be released
-back to input (high-Z) after use by sending `value: "z"`.  Leaving a pin
-driven can interfere with DUT operation (e.g. holding GPIO 2 low permanently
-would prevent the DUT from ever entering normal boot mode).
+**IMPORTANT — Always release pins by driving HIGH:** GPIO pins connected to
+ESP32 EN or BOOT must be released by driving HIGH (`1`), never by setting
+hi-Z (`"z"`).  Hi-Z leaves pins floating, which crashes the Pi's dwc_otg
+USB controller.  Leave pins driven HIGH when not actively asserting them.
 
 #### 18.1 Endpoints
 
@@ -849,7 +849,7 @@ Request body:
 | Field | Type | Required | Values | Description |
 |-------|------|----------|--------|-------------|
 | pin | int | Yes | See allowlist | Pi BCM GPIO pin number |
-| value | int/string | Yes | `0`, `1`, `"z"` | 0 = drive low, 1 = drive high, "z" = release to input (high-Z) |
+| value | int/string | Yes | `0`, `1`, `"z"` | 0 = drive low, 1 = drive high, "z" = release to input (high-Z). **Never use "z" on EN/BOOT pins — crashes Pi.** |
 
 Response:
 ```json
@@ -881,23 +881,23 @@ GPIO control provides an alternative approach to triggering captive portal
 mode on the DUT (complementary to `POST /api/enter-portal` which handles
 the WiFi provisioning flow after the device is already in portal mode):
 
-1. `POST /api/gpio/set` `{"pin": 18, "value": 0}` — hold DUT boot pin (GPIO0/GPIO9) LOW
+1. `POST /api/gpio/set` `{"pin": 18, "value": 0}` — hold DUT boot pin (GPIO0) LOW
 2. `POST /api/gpio/set` `{"pin": 17, "value": 0}` — pull DUT EN/RST LOW (reset)
-3. Wait 100ms, then `POST /api/gpio/set` `{"pin": 17, "value": "z"}` — release reset; DUT boots into portal mode
+3. Wait 100ms, then `POST /api/gpio/set` `{"pin": 17, "value": 1}` — release reset HIGH; DUT boots into portal mode
 4. Verify captive portal from serial output (look for `CAPTIVE PORTAL MODE TRIGGERED` or `AP Started:`)
-5. `POST /api/gpio/set` `{"pin": 18, "value": "z"}` — release boot pin immediately
+5. `POST /api/gpio/set` `{"pin": 18, "value": 1}` — release boot pin HIGH
 
 The `ok: true` response from `/api/gpio/set` confirms the pin is driven —
 there is no need to poll `/api/gpio/status` to verify.
 
 **Driver methods:**
 ```python
-wt.gpio_set(18, 0)           # Hold DUT boot pin (GPIO0/GPIO9) LOW
+wt.gpio_set(18, 0)           # Hold DUT boot pin (GPIO0) LOW
 wt.gpio_set(17, 0)           # Pull EN/RST LOW (reset)
 time.sleep(0.1)
-wt.gpio_set(17, "z")         # Release reset — DUT boots into portal mode
+wt.gpio_set(17, 1)           # Release reset HIGH — DUT boots into portal mode
 # Check serial output for portal confirmation
-wt.gpio_set(18, "z")         # Release boot pin — ALWAYS do this when done
+wt.gpio_set(18, 1)           # Release boot pin HIGH
 ```
 
 ### FR-019 — Test Progress Tracking
@@ -1404,9 +1404,8 @@ using a two-step probe:
 
 #### Probe Algorithm
 
-**CRITICAL:** Always release EN and BOOT by driving HIGH (`1`), never directly
-to hi-Z (`"z"`).  Floating GPIO lines connected to ESP32 EN/BOOT can crash the
-Pi's dwc_otg USB controller.  Only switch to hi-Z after pins are stable HIGH.
+**CRITICAL:** Never use hi-Z (`"z"`) on EN or BOOT pins.  Only use LOW (`0`) and
+HIGH (`1`).  Hi-Z leaves pins floating, which crashes the Pi's dwc_otg USB controller.
 
 ```
 Step 1: Try GPIO-based download mode entry
@@ -1417,9 +1416,8 @@ Step 1: Try GPIO-based download mode entry
   1e. Drive Pi GPIO17 HIGH (release reset — ESP32 samples BOOT pin now)
   1f. Wait 500ms
   1g. Drive Pi GPIO18 HIGH (release BOOT)
-  1h. (Optional) Set GPIO17 and GPIO18 to hi-Z once stable
-  1i. Monitor slot serial output for 3 seconds
-  1j. Check for USB disconnect/reconnect in dmesg or boot mode in serial:
+  1h. Monitor slot serial output for 3 seconds
+  1i. Check for USB disconnect/reconnect in dmesg or boot mode in serial:
       - USB re-enumeration or "DOWNLOAD" boot mode → GPIO controls this board ✓
       - No USB event and no output → GPIO has no effect, go to Step 2
 
@@ -1448,10 +1446,9 @@ Step 2: Try USB DTR/RTS reset (fallback)
 
 #### Caveats
 
-1. **Never release EN/BOOT to hi-Z directly.**  The Pi Zero W's dwc_otg USB
-   controller is sensitive to floating GPIO lines connected to ESP32 EN/BOOT.
-   Releasing directly to hi-Z (`"z"`) can crash or hang the Pi.  Always drive
-   HIGH (`1`) first to release, then optionally switch to hi-Z once stable.
+1. **Never use hi-Z (`"z"`) on EN or BOOT pins.**  The Pi Zero W's dwc_otg USB
+   controller crashes when GPIO lines connected to ESP32 EN/BOOT float.
+   Only use LOW (`0`) and HIGH (`1`) for these pins.
 2. **Firmware crash loops** produce continuous `rst:0xc` resets that can mask a
    GPIO-triggered reset.  For reliable probing, first erase flash
    (`esptool.py erase_flash`) so the board sits idle in bootloader, or flash
