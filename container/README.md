@@ -18,8 +18,8 @@ Response:
 ```json
 {
   "devices": [
-    {"url": "rfc2217://192.168.1.100:4001", "port": 4001, "product": "CP2102", "serial": "0001"},
-    {"url": "rfc2217://192.168.1.100:4002", "port": 4002, "product": "CH340", "serial": "5678"}
+    {"url": "rfc2217://PI_IP:4001", "port": 4001, "product": "CP2102", "serial": "0001"},
+    {"url": "rfc2217://PI_IP:4002", "port": 4002, "product": "CH340", "serial": "5678"}
   ]
 }
 ```
@@ -32,18 +32,18 @@ Use the included `discover.py`:
 from discover import discover_devices, get_device_url, get_serial_connection
 
 # List all devices
-devices = discover_devices("192.168.1.100")
+devices = discover_devices(PI_HOST)
 for d in devices:
     print(f"{d['url']} - {d['product']}")
 
 # Get URL for first device
-url = get_device_url("192.168.1.100", index=0)
+url = get_device_url(PI_HOST, index=0)
 
 # Get URL by serial number
-url = get_device_url("192.168.1.100", serial="58DD029450")
+url = get_device_url(PI_HOST, serial="58DD029450")
 
 # Get ready-to-use serial connection
-ser = get_serial_connection("192.168.1.100", index=0)
+ser = get_serial_connection(PI_HOST, index=0)
 print(ser.readline())
 ```
 
@@ -52,7 +52,7 @@ print(ser.readline())
 Set `PI_HOST` and use auto-discovery:
 
 ```bash
-export PI_HOST=192.168.1.100
+export PI_HOST=<your-pi-ip>
 export ESP32_INDEX=0  # First device (default)
 # or
 export ESP32_SERIAL=58DD029450  # By serial number
@@ -66,7 +66,7 @@ If you know the port, just use it directly:
 
 ```python
 import serial
-ser = serial.serial_for_url("rfc2217://192.168.1.100:4001", baudrate=115200)
+ser = serial.serial_for_url("rfc2217://PI_IP:4001", baudrate=115200)
 ```
 
 ## Connection Methods

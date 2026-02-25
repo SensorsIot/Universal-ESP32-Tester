@@ -8,13 +8,13 @@ Usage:
     # As a module
     from discover import discover_devices, get_device_url
 
-    devices = discover_devices("192.168.1.100")
-    url = get_device_url("192.168.1.100", index=0)  # First device
+    devices = discover_devices("<PI_HOST>")
+    url = get_device_url("<PI_HOST>", index=0)  # First device
 
     # Command line
-    python discover.py 192.168.1.100
-    python discover.py 192.168.1.100 --index 1
-    python discover.py 192.168.1.100 --serial 58DD029450
+    python discover.py <PI_HOST>
+    python discover.py <PI_HOST> --index 1
+    python discover.py <PI_HOST> --serial 58DD029450
 """
 
 import json

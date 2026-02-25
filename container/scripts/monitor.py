@@ -12,16 +12,16 @@ Environment variables:
 
 Usage:
     # With explicit URL
-    ESP32_PORT=rfc2217://192.168.1.100:4001 python monitor.py
+    ESP32_PORT=rfc2217://<PI_HOST>:4001 python monitor.py
 
     # With auto-discovery (first device)
-    PI_HOST=192.168.1.100 python monitor.py
+    PI_HOST=<PI_HOST> python monitor.py
 
     # With auto-discovery (second device)
-    PI_HOST=192.168.1.100 ESP32_INDEX=1 python monitor.py
+    PI_HOST=<PI_HOST> ESP32_INDEX=1 python monitor.py
 
     # With auto-discovery (by serial number)
-    PI_HOST=192.168.1.100 ESP32_SERIAL=58DD029450 python monitor.py
+    PI_HOST=<PI_HOST> ESP32_SERIAL=58DD029450 python monitor.py
 """
 
 import os

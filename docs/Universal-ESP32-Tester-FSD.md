@@ -21,7 +21,7 @@ and reporting station events — all controlled over the same HTTP API.
        │                                               │
        ▼                                               ▼
 ┌─────────────────────────┐              ┌─────────────────────────────────┐
-│  Serial Portal Pi       │              │  VM Host (192.168.0.160)        │
+│  Serial Portal Pi       │              │  VM Host                        │
 │  192.168.0.87           │              │                                 │
 │                         │              │  ┌─────────────────────┐        │
 │  ┌───────────┐          │              │  │ Container A         │        │
@@ -37,7 +37,7 @@ and reporting station events — all controlled over the same HTTP API.
 │  ┌───────────────────┐  │
 │  │ WiFi Tester       │  │
 │  │ wlan0 (onboard)   │  │
-│  │  AP: 192.168.4.1  │  │
+│  │  AP: <AP_IP>      │  │
 │  │  STA / Scan       │  │
 │  └───────────────────┘  │
 │                         │                    ┌──────────────────┐
@@ -146,8 +146,8 @@ State transitions:
 | State | Description |
 |-------|-------------|
 | Idle | wlan0 not in use for testing |
-| Captive | wlan0 joined DUT's portal AP as STA (Pi at 192.168.4.x, DUT at 192.168.4.1) |
-| AP | wlan0 running test AP (Pi at 192.168.4.1, DUT connects at 192.168.4.x) |
+| Captive | wlan0 joined DUT's portal AP as STA (Pi gets DHCP address, DUT at its SoftAP gateway) |
+| AP | wlan0 running test AP (Pi at AP_IP, DUT connects via DHCP) |
 
 State transitions:
 
@@ -648,7 +648,7 @@ a local AP with those same credentials for the DUT to connect back to.
 
 **Procedure:**
 1. Join the DUT's captive portal SoftAP (`portal_ssid`) as a WiFi station
-2. `POST` the WiFi credentials (`ssid`, `password`) to `http://192.168.4.1/connect`
+2. `POST` the WiFi credentials (`ssid`, `password`) to the DUT's captive portal at `/connect`
    on the DUT's built-in provisioning endpoint
 3. Disconnect from the DUT's SoftAP
 4. Start a local AP with the provisioned `ssid` and `password` so the DUT
@@ -665,8 +665,8 @@ failure (e.g., unable to join SoftAP, credential submission failed)
 The Pi's wlan0 runs hostapd + dnsmasq to create a SoftAP:
 
 - **SSID/password/channel** configurable per `POST /api/wifi/ap_start`
-- **IP addressing:** AP IP is `192.168.4.1/24`
-- **DHCP range:** `192.168.4.2` – `192.168.4.20`, 1-hour leases
+- **IP addressing:** AP IP defaults to `192.168.4.1/24` (configurable via `WIFI_AP_IP` env var)
+- **DHCP range:** defaults to `192.168.4.2` – `192.168.4.20`, 1-hour leases (configurable via `WIFI_DHCP_START`/`WIFI_DHCP_END` env vars)
 - **Station tracking:** dnsmasq calls `wifi-lease-notify.sh` on DHCP events
   (add/old/del), which posts to `POST /api/wifi/lease_event`.  The portal
   maintains an in-memory station table `{mac, ip}` and emits STA_CONNECT /
@@ -940,15 +940,15 @@ packets and makes them available through the HTTP API and web UI.
 {
   "ok": true,
   "lines": [
-    {"ts": 1740000000.123, "source": "192.168.0.121", "line": "I (12345) wifi_mgr: Connected"},
-    {"ts": 1740000000.456, "source": "192.168.0.121", "line": "I (12346) ble_nus: Client connected"}
+    {"ts": 1740000000.123, "source": "<DUT_IP>", "line": "I (12345) wifi_mgr: Connected"},
+    {"ts": 1740000000.456, "source": "<DUT_IP>", "line": "I (12346) ble_nus: Client connected"}
   ]
 }
 ```
 
 **Driver methods:**
 ```python
-logs = wt.udplog(since=0, source="192.168.0.121", limit=100)
+logs = wt.udplog(since=0, source="<DUT_IP>", limit=100)
 wt.udplog_clear()
 ```
 
@@ -1050,13 +1050,13 @@ client on the LAN.
    ```
 3. **Trigger OTA** on the ESP32 via the HTTP relay:
    ```
-   POST /api/wifi/http  {"method":"POST", "url":"http://192.168.4.15/ota"}
+   POST /api/wifi/http  {"method":"POST", "url":"http://<DUT_IP>/ota"}
    ```
    The ESP32 must expose a `POST /ota` endpoint that calls `esp_ota_ops`
    to download from `http://192.168.0.87:8080/firmware/<project>/<file>.bin`.
 4. **Monitor progress** via UDP logs:
    ```
-   GET /api/udplog?source=192.168.4.15
+   GET /api/udplog?source=<DUT_IP>
    ```
    The ESP32 logs OTA progress (download bytes, partition writes, reboot)
    which the tester captures on UDP port 5555.
@@ -1610,11 +1610,11 @@ WantedBy=multi-user.target
 | Constant | Value |
 |----------|-------|
 | WLAN_IF | `wlan0` (env: `WIFI_WLAN_IF`) |
-| AP_IP | `192.168.4.1` |
-| AP_NETMASK | `255.255.255.0` |
-| AP_SUBNET | `192.168.4.0/24` |
-| DHCP_RANGE_START | `192.168.4.2` |
-| DHCP_RANGE_END | `192.168.4.20` |
+| AP_IP | `192.168.4.1` (env: `WIFI_AP_IP`) |
+| AP_NETMASK | `255.255.255.0` (env: `WIFI_AP_NETMASK`) |
+| AP_SUBNET | `192.168.4.0/24` (env: `WIFI_AP_SUBNET`) |
+| DHCP_RANGE_START | `192.168.4.2` (env: `WIFI_DHCP_START`) |
+| DHCP_RANGE_END | `192.168.4.20` (env: `WIFI_DHCP_END`) |
 | DHCP_LEASE_TIME | `1h` |
 | WORK_DIR | `/tmp/wifi-tester` |
 | VERSION | `1.0.0-pi` |

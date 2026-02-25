@@ -27,7 +27,7 @@ Works with esptool, PlatformIO, ESP-IDF, and any pyserial-based tool. One client
 
 The Pi's **wlan0** radio acts as a programmable WiFi access point or station, isolated from the wired LAN on eth0.
 
-- **AP mode** — start a SoftAP with any SSID/password. DUTs connect to `192.168.4.x`, Pi is at `192.168.4.1`. DHCP and DNS included.
+- **AP mode** — start a SoftAP with any SSID/password. DUTs connect via DHCP, Pi is at the configured AP IP (default `192.168.4.1`). DHCP and DNS included.
 - **STA mode** — join a DUT's captive portal AP as a station to test provisioning flows.
 - **HTTP relay** — proxy HTTP requests through the Pi's radio to devices on its WiFi network.
 - **Scan** — list nearby WiFi networks to verify a DUT's AP is broadcasting.
@@ -249,11 +249,11 @@ finally:
 
 # Join DUT's captive portal AP
 ut.sta_join("MyDevice-Setup", timeout=15)
-resp = ut.http_get("http://192.168.4.1/")
+resp = ut.http_get(f"http://{ut.ap_ip}/")
 ut.sta_leave()
 
 # UDP logs
-logs = ut.udplog(source="192.168.0.121")
+logs = ut.udplog(source="<DUT_IP>")
 ut.udplog_clear()
 
 # OTA firmware
@@ -292,10 +292,10 @@ curl -o /dev/null -w "%{http_code}" \
 #    (the ESP32 must expose a /ota endpoint and be connected to the tester's AP)
 curl -X POST http://192.168.0.87:8080/api/wifi/http \
   -H "Content-Type: application/json" \
-  -d '{"method":"POST","url":"http://192.168.4.15/ota"}'
+  -d '{"method":"POST","url":"http://<DUT_IP>/ota"}'
 
 # 4. Monitor progress via UDP logs
-curl http://192.168.0.87:8080/api/udplog?source=192.168.4.15
+curl http://192.168.0.87:8080/api/udplog?source=<DUT_IP>
 ```
 
 The ESP32 device must:
@@ -328,7 +328,7 @@ curl -X POST http://192.168.0.87:8080/api/gpio/set \
   -H "Content-Type: application/json" -d '{"pin":18,"value":"z"}'
 
 # Get UDP logs
-curl http://192.168.0.87:8080/api/udplog?source=192.168.0.121&limit=50
+curl http://192.168.0.87:8080/api/udplog?source=<DUT_IP>&limit=50
 
 # Upload firmware
 curl -X POST http://192.168.0.87:8080/api/firmware/upload \
@@ -461,7 +461,7 @@ pytest/
   test_instrument.py         Self-tests for the instrument
 
 docs/
-  Serial-Portal-FSD.md       Full functional specification
+  Universal-ESP32-Tester-FSD.md  Full functional specification
 ```
 
 ---

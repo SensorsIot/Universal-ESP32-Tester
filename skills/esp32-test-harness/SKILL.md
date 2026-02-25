@@ -18,9 +18,9 @@ How to manipulate the ESP32-C3 DUT during automated tests using the Serial Porta
 | Component | Address | Role |
 |-----------|---------|------|
 | Serial Portal | 192.168.0.87:8080 | RFC2217 serial proxy, WiFi/Serial API |
-| DUT WiFi (test AP) | 192.168.4.x | DUT on WiFi Tester AP |
-| DUT WiFi (portal) | 192.168.4.1 | DUT in captive portal AP mode |
-| MQTT broker | 192.168.0.203:1883 | Mosquitto (on home network only) |
+| DUT WiFi (test AP) | DHCP-assigned on AP subnet | DUT on WiFi Tester AP |
+| DUT WiFi (portal) | DUT's SoftAP gateway IP | DUT in captive portal AP mode |
+| MQTT broker | site-specific | Mosquitto (on home network only) |
 
 Slots are tied to physical USB connectors on the Pi, not to devices. **Always discover the DUT slot at runtime** using `wt.get_devices()` — never hardcode a slot label or port number.
 
@@ -87,8 +87,8 @@ wt.scan()                                  # dict — nearby networks
 
 **HTTP relay (reach DUT on isolated network):**
 ```python
-wt.http_get("http://192.168.4.1/api/status")         # Response
-wt.http_post("http://192.168.4.1/api/wifi",
+wt.http_get(f"http://{dut_ip}/api/status")             # Response
+wt.http_post(f"http://{dut_ip}/api/wifi",
              json_data={"ssid": "TestAP-Modbus", "password": "test12345"})  # Response
 ```
 
@@ -162,7 +162,7 @@ if result["matched"]:
 Flashing uses esptool directly (not through the driver). Get `PORT` from `wt.get_slot()["url"]`:
 
 ```bash
-# PORT from driver discovery, e.g. "rfc2217://192.168.0.87:4002"
+# PORT from driver discovery, e.g. wt.get_slot()["url"]
 
 # ESP32-C3 (native USB)
 python3 -m esptool --chip esp32c3 \
@@ -201,7 +201,7 @@ python3 -m esptool --chip esp32c3 \
 
 After erase, the DUT resets and boots with:
 - WiFi: `private-2G` (from credentials.h) — **only for initial setup, not for tests**
-- MQTT: 192.168.0.203:1883 (compiled default)
+- MQTT: site-specific broker (compiled default)
 - Boot count: 0
 - Debug mode: off
 
@@ -248,15 +248,15 @@ wt.wait_for_state(SLOT, "idle", timeout=30)
 wt.sta_join("MODBUS-Proxy-Setup", "modbus-setup", timeout=15)
 
 # Access portal page
-resp = wt.http_get("http://192.168.4.1/")
+resp = wt.http_get(f"http://{dut_portal_ip}/")
 print(f"Status: {resp.status_code}, Body: {resp.text[:200]}")
 
 # Scan for networks from portal
-resp = wt.http_get("http://192.168.4.1/api/scan")
+resp = wt.http_get(f"http://{dut_portal_ip}/api/scan")
 print(resp.json())
 
 # Submit WiFi credentials through portal
-resp = wt.http_post("http://192.168.4.1/api/wifi",
+resp = wt.http_post(f"http://{dut_portal_ip}/api/wifi",
                      json_data={"ssid": "TestAP-Modbus", "password": "test12345"})
 print(resp.json())
 
@@ -315,16 +315,16 @@ print(f"DUT connected: {evt}")
 
 ### 5.5 HTTP relay to DUT on test AP
 
-When DUT is on the WiFi Tester's AP (192.168.4.x), use relay:
+When DUT is on the WiFi Tester's AP, use relay (DUT IP from `wt.wait_for_station()`):
 
 ```python
 # GET
-resp = wt.http_get("http://192.168.4.6/api/status")
+resp = wt.http_get(f"http://{dut_ip}/api/status")
 status = resp.json()
 print(f"FW: {status['fw_version']}, Heap: {status['free_heap']}")
 
 # POST
-resp = wt.http_post("http://192.168.4.6/api/debug",
+resp = wt.http_post(f"http://{dut_ip}/api/debug",
                      json_data={"enabled": True})
 ```
 
@@ -364,11 +364,11 @@ human.join()
 wt.sta_join("MODBUS-Proxy-Setup", "modbus-setup", timeout=15)
 
 # 3. Test portal page
-resp = wt.http_get("http://192.168.4.1/")
+resp = wt.http_get(f"http://{dut_portal_ip}/")
 assert resp.status_code == 200
 
 # 4. Submit credentials
-resp = wt.http_post("http://192.168.4.1/api/wifi",
+resp = wt.http_post(f"http://{dut_portal_ip}/api/wifi",
                      json_data={"ssid": "TestAP-Modbus", "password": "test12345"})
 wt.sta_leave()
 

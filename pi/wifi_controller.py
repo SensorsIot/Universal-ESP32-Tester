@@ -26,11 +26,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 WLAN_IF = os.environ.get("WIFI_WLAN_IF", "wlan0")
-AP_IP = "192.168.4.1"
-AP_NETMASK = "255.255.255.0"
-AP_SUBNET = "192.168.4.0/24"
-DHCP_RANGE_START = "192.168.4.2"
-DHCP_RANGE_END = "192.168.4.20"
+AP_IP = os.environ.get("WIFI_AP_IP", "192.168.4.1")
+AP_NETMASK = os.environ.get("WIFI_AP_NETMASK", "255.255.255.0")
+AP_SUBNET = os.environ.get("WIFI_AP_SUBNET", "192.168.4.0/24")
+DHCP_RANGE_START = os.environ.get("WIFI_DHCP_START", "192.168.4.2")
+DHCP_RANGE_END = os.environ.get("WIFI_DHCP_END", "192.168.4.20")
 DHCP_LEASE_TIME = "1h"
 
 WORK_DIR = "/tmp/wifi-tester"

@@ -645,11 +645,12 @@ def serial_monitor(slot: dict, pattern: str | None = None,
 # Enter-portal — composite serial operation (FR-008 + FR-009)
 # ---------------------------------------------------------------------------
 
-def _do_enter_portal(portal_ssid: str, wifi_ssid: str, wifi_password: str):
+def _do_enter_portal(portal_ssid: str, wifi_ssid: str, wifi_password: str,
+                     portal_ip: str = "192.168.4.1"):
     """Connect to a device's captive portal SoftAP and submit WiFi credentials.
 
     1. Join the device's SoftAP (portal_ssid, open network)
-    2. POST credentials to http://192.168.4.1/connect
+    2. POST credentials to the device's captive portal
     3. Disconnect from SoftAP
     4. Start our own AP with the submitted credentials so the device can connect
     """
@@ -675,7 +676,7 @@ def _do_enter_portal(portal_ssid: str, wifi_ssid: str, wifi_password: str):
         body_b64 = base64.b64encode(form_data).decode("ascii")
         resp = wifi_controller.http_relay(
             method="POST",
-            url="http://192.168.4.1/connect",
+            url=f"http://{portal_ip}/connect",
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             body=body_b64,
             timeout=10,
@@ -1243,6 +1244,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         global _enter_portal_running
         body = self._read_json() or {}
         portal_ssid = body.get("portal_ssid", "iOS-Keyboard-Setup")
+        portal_ip = body.get("portal_ip", "192.168.4.1")
         wifi_ssid = body.get("ssid", "")
         wifi_password = body.get("password", "")
 
@@ -1260,7 +1262,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         def _bg_enter_portal():
             global _enter_portal_running
             try:
-                _do_enter_portal(portal_ssid, wifi_ssid, wifi_password)
+                _do_enter_portal(portal_ssid, wifi_ssid, wifi_password, portal_ip)
             except Exception as e:
                 log_activity(f"Enter-portal error: {e}", "error")
             finally:

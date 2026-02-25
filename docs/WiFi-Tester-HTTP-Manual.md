@@ -67,7 +67,7 @@ All endpoints return `{"ok": true, ...}` or `{"ok": false, "error": "message"}`.
 ```python
 from wifi_tester_driver import WiFiTesterDriver
 
-wt = WiFiTesterDriver("http://192.168.1.50:8080")
+wt = WiFiTesterDriver("http://<PI_IP>:8080")
 wt.open()
 
 # Ping
@@ -114,7 +114,7 @@ wt.close()
 
 ## Networking Notes
 
-- **AP IP** is always `192.168.4.1/24`, DHCP range `.2`-`.20` (matches ESP32)
+- **AP IP** defaults to `192.168.4.1/24`, DHCP range `.2`-`.20` (configurable via env vars `WIFI_AP_IP`, `WIFI_DHCP_START`, `WIFI_DHCP_END`)
 - AP and STA modes are mutually exclusive (starting one stops the other)
 - Station connect/disconnect events arrive via dnsmasq lease callbacks
 - The `body` field in HTTP relay requests/responses is **base64-encoded**
