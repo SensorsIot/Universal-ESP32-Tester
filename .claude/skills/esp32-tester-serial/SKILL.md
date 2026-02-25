@@ -112,12 +112,39 @@ Each slot exposes an RFC2217 URL from `/api/devices`. Use it with esptool direct
 # 1. Get the RFC2217 URL
 SLOT_URL=$(curl -s http://192.168.0.87:8080/api/devices | jq -r '.slots[0].url')
 
-# 2. Flash firmware
-esptool.py --port "$SLOT_URL" --chip esp32c3 write_flash 0x0 firmware.bin
+# 2. Flash firmware (use correct --before flag for device type)
+# Native USB (ESP32-S3/C3, ttyACM):
+esptool.py --port "$SLOT_URL" --chip esp32s3 --before=usb_reset write_flash 0x0 firmware.bin
+# UART bridge (ESP32, ttyUSB):
+esptool.py --port "$SLOT_URL" --chip esp32 --before=default_reset write_flash 0x0 firmware.bin
 
 # 3. Erase NVS partition
-esptool.py --port "$SLOT_URL" --chip esp32c3 erase_region 0x9000 0x6000
+esptool.py --port "$SLOT_URL" --chip esp32s3 erase_region 0x9000 0x6000
 ```
+
+### Key esptool flags by device type
+
+| Device | `--before` | `--after` |
+|--------|-----------|----------|
+| ESP32-S3 (ttyACM, native USB) | `usb_reset` | `hard_reset` |
+| ESP32-C3 (ttyACM, native USB) | `usb_reset` | `watchdog_reset` |
+| ESP32 (ttyUSB, UART bridge) | `default_reset` | `hard_reset` |
+
+## Recovering a Crash-Looping Device
+
+When firmware crashes on boot (e.g. assert failure, init order bug), the ESP32 enters a rapid panic→reboot cycle. Serial monitor will show repeated `rst:0xc (RTC_SW_CPU_RST)` resets with crash backtraces.
+
+**For native USB devices (ESP32-S3/C3):** `esptool --before=usb_reset` can connect even during a crash loop — it catches the device during the brief USB re-enumeration between reboots.
+
+```bash
+# Erase flash to stop the crash loop
+esptool.py --port "rfc2217://192.168.0.87:<PORT>?ign_set_control" \
+  --chip esp32s3 --before=usb_reset erase_flash
+```
+
+After erasing, the device boots to empty flash (`invalid header: 0xffffffff`) and stops looping. Verify with serial reset — should show `rst:0x15 (USB_UART_CHIP_RESET)` and `boot:0x28 (SPI_FAST_FLASH_BOOT)`.
+
+**For dual-USB hub boards:** run esptool on the **JTAG slot** (not the UART slot).
 
 ## Slot States
 
@@ -169,6 +196,7 @@ curl -X POST http://192.168.0.87:8080/api/serial/monitor \
 | "proxy not running" | Device may be flapping — check `state` field |
 | Monitor timeout, no output | Baud rate is fixed at 115200; ensure device matches. **For dual-USB boards:** console output goes to the UART slot, not the JTAG slot — make sure you're monitoring the right slot |
 | `flapping` state | USB connection cycling — wait 30s for cooldown |
-| esptool can't connect | Ensure slot is `idle`; may need to enter download mode via GPIO (see esp32-tester-gpio) |
+| esptool can't connect | Ensure slot is `idle`; for native USB use `--before=usb_reset`; may need GPIO download mode for UART bridge boards (see esp32-tester-gpio) |
+| Device crash-looping (`rst:0xc` repeated) | Firmware panic loop — erase flash with `esptool.py --before=usb_reset erase_flash` to break the cycle (works even during crash loops on native USB) |
 | Reset works but no boot output | On dual-USB boards, reset via JTAG slot but boot output appears on UART slot |
 | Board occupies two slots | Onboard USB hub — identify JTAG vs UART via `udevadm info` (see above) |

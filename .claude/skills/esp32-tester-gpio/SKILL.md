@@ -105,7 +105,7 @@ curl -X POST http://192.168.0.87:8080/api/serial/reset \
 | No output | No output | No control — check wiring or wrong slot |
 
 ### Caveats
-- **Firmware crash loops** (`rst:0xc`) mask GPIO resets. For reliable probing, erase flash first or use known-good firmware.
+- **Firmware crash loops** (`rst:0xc`) mask GPIO resets — continuous panic reboots make it impossible to distinguish a GPIO-triggered reset from a crash-triggered one. For reliable probing, first break the crash loop with `esptool.py --before=usb_reset erase_flash` (works even during crash loops on native USB devices — see esp32-tester-serial), then re-run the probe on the clean device.
 - **Dual-USB hub boards** always respond to USB DTR/RTS on the JTAG slot; GPIO probe will show no effect.
 - Probe only needs to run once per physical board.
 

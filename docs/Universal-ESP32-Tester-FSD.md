@@ -438,11 +438,31 @@ python3 -m esptool --chip esp32 \
 
 | Device | `--before` | `--after` |
 |--------|-----------|----------|
-| ESP32-C3 (ttyACM) | `usb-reset` | `watchdog-reset` |
-| ESP32 (ttyUSB) | `default-reset` | `hard-reset` |
+| ESP32-C3 (ttyACM, native USB) | `usb_reset` | `watchdog_reset` |
+| ESP32-S3 (ttyACM, native USB) | `usb_reset` | `hard_reset` |
+| ESP32 (ttyUSB, UART bridge) | `default_reset` | `hard_reset` |
 
 **Note:** A harmless RFC2217 parameter negotiation error may appear at the
 end of flashing — the flash and reset still complete successfully.
+
+**Recovering a crash-looping device (native USB):**
+
+When an ESP32-S3 or ESP32-C3 enters a firmware crash loop (continuous panic
+reboots with `rst:0xc`), the device keeps re-enumerating on USB.  Despite the
+crash loop, `esptool.py --before=usb_reset` can still connect during the brief
+window between reboots.  Use `erase_flash` to wipe the bad firmware and stop
+the loop:
+
+```bash
+esptool.py --port "rfc2217://192.168.0.87:<PORT>?ign_set_control" \
+  --chip esp32s3 --before=usb_reset erase_flash
+```
+
+After erasing, the device boots to an empty flash (prints `invalid header:
+0xffffffff` repeatedly) and is ready for a clean reflash.  A serial reset
+(`POST /api/serial/reset`) will show `rst:0x15 (USB_UART_CHIP_RESET)` with
+`boot:0x28 (SPI_FAST_FLASH_BOOT)`, confirming the device is responsive and
+USB DTR/RTS control works.
 
 #### 6.8 RFC2217 Client Best Practices (ttyACM)
 
@@ -566,7 +586,16 @@ serial reset (FR-008) and serial monitor (FR-009):
 4. If device boots normally → clear flapping flag, proxy restarts via
    hotplug re-enumeration
 5. If boot loop continues (device disconnects again within cooldown) →
-   re-enter flapping state, log error
+   attempt flash erase recovery (step 6), then re-enter flapping state
+6. **Flash erase recovery (native USB devices):** For `ttyACM` devices
+   (ESP32-S3/C3 with native USB), run `esptool.py --before=usb_reset
+   erase_flash` via the slot's RFC2217 URL.  This works even during a
+   crash loop — esptool catches the device during the brief USB
+   re-enumeration between panic reboots.  After erasing, the device boots
+   to empty flash (`invalid header: 0xffffffff`), stops the USB
+   flapping, and the slot returns to `idle`.  For `ttyUSB` devices (UART
+   bridge), this step is skipped — those require GPIO-based download mode
+   entry or manual intervention.
 
 **Fallback:** If no hotplug event arrives within `FLAP_COOLDOWN_S` (30s),
 the flapping flag is cleared passively and normal proxy startup resumes
@@ -1306,7 +1335,7 @@ The portal serves a single-page HTML UI at `GET /` (port 8080):
 | Dual-USB hub board | Board exposes onboard hub with JTAG + UART interfaces — occupies two slots (see §6.6) |
 | Device not ready | Settle checks with timeout, then fail with `last_error` |
 | ttyACM DTR trap | `wait_for_device()` skips `os.open()` for ttyACM; proxy uses controlled boot sequence (FR-006) |
-| Boot loop (USB flapping) | Flap detection suppresses proxy restarts; clears after cooldown (FR-007) |
+| Boot loop (USB flapping) | Flap detection suppresses proxy restarts; clears after cooldown (FR-007). To break the loop: `esptool.py --before=usb_reset erase_flash` over RFC2217 (works even during crash loops on native USB devices) |
 | ESP32-C3 stuck in download mode | Run esptool on Pi with `--after=watchdog-reset` to trigger system reset (FR-006.6) |
 | udev PrivateNetwork blocking curl | udev runs RUN+ handlers in a network-isolated sandbox (`PrivateNetwork=yes`). Direct `curl` to localhost silently fails. Fix: wrap the notify script with `systemd-run --no-block` in the udev rule so it runs outside the sandbox. |
 
