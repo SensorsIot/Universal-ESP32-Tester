@@ -43,7 +43,7 @@ Only include what the project actually needs to test:
 | Feature to test | Tester capability | Skill |
 |----------------|-------------------|-------|
 | Firmware boots correctly | Serial reset + monitor for expected output | `esp32-tester-serial` |
-| WiFi provisioning works | Captive portal automation + AP status check | `esp32-tester-wifi` |
+| WiFi provisioning works | `enter-portal` (auto-provisions via captive portal if needed) + AP status check | `esp32-tester-wifi` |
 | OTA updates work | Upload binary + trigger via HTTP relay + monitor logs | `esp32-tester-ota` |
 | BLE interface responds | Scan + connect + write + verify via logs | `esp32-tester-ble` |
 | Boot mode selection | GPIO pin drive during reset | `esp32-tester-gpio` |
@@ -82,7 +82,10 @@ For dual-USB hub boards (two slots):
 | ... | (project-specific connections) |
 ```
 
-Include project-specific constants (captive portal SSID, tester AP credentials, BLE device name, OTA endpoint URL).
+Include project-specific constants. **For WiFi provisioning, always document all three values:**
+- Device's captive portal SoftAP name (`portal_ssid`)
+- Tester AP SSID (`ssid`) — the tester fills this into the device's portal form
+- Tester AP password (`password`) — the tester fills this into the device's portal form
 
 #### 4b. Test procedures for each feature
 
@@ -98,18 +101,26 @@ Example structure:
 **Prerequisite:** device freshly flashed, no WiFi credentials stored.
 
 **Steps:**
-1. Trigger captive portal provisioning:
+1. Ensure device is on tester AP (provisions via captive portal if needed):
    ```bash
    curl -X POST http://192.168.0.87:8080/api/enter-portal \
      -H 'Content-Type: application/json' \
-     -d '{"portal_ssid": "<device-AP>", "ssid": "<tester-AP>", "password": "<password>"}'
+     -d '{"portal_ssid": "<device-portal-AP>", "ssid": "<tester-AP>", "password": "<tester-pass>"}'
    ```
+   The tester starts its AP, waits for the device to connect. If the device
+   has no credentials, the tester joins the device's captive portal SoftAP,
+   follows the redirect, fills in its own AP SSID/password, and submits.
 2. Verify device connected:
    ```bash
    curl http://192.168.0.87:8080/api/wifi/ap_status
    ```
 
-**Success:** `ap_status` shows device IP in `192.168.4.x` range.
+**Success:** `ap_status` shows device as connected client.
+
+**All three values must come from the project FSD** — never guess them:
+- `portal_ssid` = device's captive portal SoftAP name
+- `ssid` = tester's AP SSID (what the tester fills into the portal)
+- `password` = tester's AP password (what the tester fills into the portal)
 ```
 
 #### 4c. Phase verification tables
@@ -161,6 +172,7 @@ Check that the testing chapter covers:
 - [ ] Every feature in the FSD has a test procedure with exact curl commands
 - [ ] Every implementation phase has a verification table
 - [ ] All project-specific values are filled in (no `<placeholder>` the AI must guess)
+- [ ] WiFi provisioning tests include all three values: `portal_ssid`, `ssid`, `password`
 - [ ] Logging strategy explains when to use serial monitor vs UDP logs for this project
 - [ ] Troubleshooting covers the most likely test failure modes
 - [ ] Only tester features the project actually uses are included
@@ -170,7 +182,7 @@ Check that the testing chapter covers:
 | Skill | Key endpoints | Tests it enables |
 |-------|-------------|-----------------|
 | `esp32-tester-serial` | `POST /api/serial/reset`, `/api/serial/monitor` | Boot verification, crash capture, pattern matching |
-| `esp32-tester-wifi` | `POST /api/enter-portal`, `/api/wifi/ap_start`, `GET /api/wifi/ap_status` | Provisioning test, AP connectivity, HTTP relay to device |
+| `esp32-tester-wifi` | `POST /api/enter-portal`, `GET /api/wifi/ap_status`, `POST /api/wifi/http` | Provisioning (auto-detects if portal needed), AP connectivity, HTTP relay to device |
 | `esp32-tester-ota` | `POST /api/firmware/upload`, `GET /api/firmware/list` | OTA update test (upload → trigger → verify) |
 | `esp32-tester-ble` | `POST /api/ble/scan`, `/api/ble/connect`, `/api/ble/write` | BLE interface test (scan → connect → send data → check logs) |
 | `esp32-tester-gpio` | `POST /api/gpio/set` | Boot mode test, button simulation |

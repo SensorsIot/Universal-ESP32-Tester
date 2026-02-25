@@ -19,7 +19,7 @@ Base URL: `http://192.168.0.87:8080`
 | GET | `/api/wifi/scan` | Scan for nearby WiFi networks |
 | POST | `/api/wifi/http` | HTTP relay — make HTTP requests via tester's network |
 | GET | `/api/wifi/events` | Long-poll for STA_CONNECT / STA_DISCONNECT events |
-| POST | `/api/enter-portal` | Captive portal provisioning (background, async) |
+| POST | `/api/enter-portal` | Ensure device is on tester AP — provision via captive portal if needed |
 | GET | `/api/wifi/ping` | Quick connectivity check |
 | POST | `/api/wifi/mode` | Set mode: `wifi-testing` or `serial-interface` |
 | GET | `/api/wifi/mode` | Get current mode |
@@ -62,23 +62,28 @@ curl -X POST http://192.168.0.87:8080/api/wifi/http \
   -H 'Content-Type: application/json' \
   -d '{"method": "POST", "url": "http://192.168.4.1/config", "headers": {"Content-Type": "application/json"}, "body": "eyJzc2lkIjoiTXlOZXQifQ==", "timeout": 10}'
 
-# Captive portal provisioning (runs in background)
+# Ensure device is on tester AP (provisions via captive portal if needed)
 curl -X POST http://192.168.0.87:8080/api/enter-portal \
   -H 'Content-Type: application/json' \
-  -d '{"portal_ssid": "iOS-Keyboard-Setup", "portal_ip": "192.168.4.1", "ssid": "HomeWiFi", "password": "secret"}'
+  -d '{"portal_ssid": "iOS-Keyboard-Setup", "ssid": "TestAP", "password": "testpass123"}'
 ```
 
 ## Common Workflows
 
-1. **Provision device via captive portal:**
-   - `POST /api/enter-portal` with target SSID/password
+1. **Ensure device is connected to tester AP:**
+   ```bash
+   curl -X POST http://192.168.0.87:8080/api/enter-portal \
+     -H 'Content-Type: application/json' \
+     -d '{"portal_ssid": "<device-AP>", "ssid": "<tester-AP>", "password": "<tester-pass>"}'
+   ```
+   - Starts tester AP if not running
+   - If device already has credentials → connects directly
+   - If not → tester joins device's captive portal, fills in its own AP credentials, submits
    - Monitor progress via `GET /api/log`
-   - Tester joins device's AP, submits credentials, then returns to normal mode
 
 2. **Test device WiFi connectivity:**
-   - `POST /api/wifi/ap_start` — create AP for DUT
-   - Reset DUT via serial reset (see esp32-tester-serial). For dual-USB hub boards: reset via JTAG slot, monitor boot output on UART slot
-   - `GET /api/wifi/events?timeout=30` — wait for DUT to connect
+   - `POST /api/enter-portal` — ensure device is on tester AP
+   - `GET /api/wifi/ap_status` — verify device is connected
    - `POST /api/wifi/http` — relay HTTP to DUT's IP to verify it responds
 
 3. **Scan and join network:**

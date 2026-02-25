@@ -656,38 +656,43 @@ serial-interface mode.
 | GET | /api/test/progress | Poll current test session state (FR-019) |
 | **Composite** | | |
 | GET | /api/log | Activity log (timestamped entries, filterable with `?since=`) |
-| POST | /api/enter-portal | Connect to DUT's captive portal SoftAP, submit WiFi credentials, then start local AP |
+| POST | /api/enter-portal | Ensure device is connected to tester AP — provision via captive portal if needed |
 
 #### Enter-Portal Composite Operation
 
-`POST /api/enter-portal` is a composite operation that connects to a DUT's
-captive portal SoftAP, submits WiFi credentials to provision it, then starts
-a local AP with those same credentials for the DUT to connect back to.
+`POST /api/enter-portal` ensures a DUT is connected to the tester's WiFi AP.
+If the device already has credentials it connects directly.  If not, the
+tester joins the device's captive portal SoftAP, fills in its own AP
+credentials, and waits for the device to reboot and connect.
 
 **Request body:**
 ```json
-{"portal_ssid": "iOS-Keyboard-Setup", "ssid": "MyNetwork", "password": "secret123"}
+{"portal_ssid": "iOS-Keyboard-Setup", "ssid": "TestAP", "password": "testpass123"}
 ```
 
-| Parameter | Required | Default | Description |
-|-----------|----------|---------|-------------|
-| `portal_ssid` | No | `"iOS-Keyboard-Setup"` | The device's SoftAP name to connect to |
-| `ssid` | Yes | — | WiFi SSID to provision on the device |
-| `password` | No | — | WiFi password to provision on the device |
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `portal_ssid` | Yes | The device's captive portal SoftAP name |
+| `ssid` | Yes | Tester AP SSID (filled into portal form, used to start AP) |
+| `password` | Yes | Tester AP password (filled into portal form, used to start AP) |
 
 **Procedure:**
-1. Join the DUT's captive portal SoftAP (`portal_ssid`) as a WiFi station
-2. `POST` the WiFi credentials (`ssid`, `password`) to `http://192.168.4.1/connect`
-   on the DUT's built-in provisioning endpoint
-3. Disconnect from the DUT's SoftAP
-4. Start a local AP with the provisioned `ssid` and `password` so the DUT
-   can connect back to the Pi after it reboots onto the new network
+1. Ensure the tester's AP is running with `ssid`/`password` (start it if not)
+2. Wait for the DUT to connect to the tester AP (short timeout)
+3. If connected → done (device already has credentials)
+4. If not connected → device is in captive portal mode:
+   a. Join the DUT's captive portal SoftAP (`portal_ssid`)
+   b. Make an HTTP request, follow the captive portal redirect
+   c. Parse the portal HTML form, fill in `ssid` and `password`
+   d. Submit the form
+   e. Disconnect from the DUT's SoftAP
+   f. Wait for the DUT to reboot and connect to the tester AP
 
 Each step is logged to the activity log.  Progress is observable via
 `GET /api/log?since=<ts>`.
 
 **Response:** `{"ok": true}` on success; `{"ok": false, "error": "..."}` on
-failure (e.g., unable to join SoftAP, credential submission failed)
+failure (e.g., unable to join SoftAP, portal form not found)
 
 ### FR-011 — AP Mode
 
