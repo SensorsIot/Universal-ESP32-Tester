@@ -42,10 +42,9 @@ curl http://192.168.0.87:8080/api/gpio/status
 | GPIO17 | EN | **RST** — pull LOW to reset the ESP32 |
 | GPIO18 | GPIO0 | **BOOT** — hold LOW during reset to enter download mode |
 
-## CRITICAL: Only Use LOW (0) and HIGH (1)
+## Pin Values
 
-**Only use `0` (low) and `1` (high) for EN and BOOT pins.** Release = drive HIGH.
-Never use hi-Z — floating pins crash the Pi's dwc_otg USB controller.
+Only use `0` (low) and `1` (high). Release = drive HIGH (`1`).
 
 ## Common Workflows
 
@@ -138,6 +137,6 @@ curl -X POST http://192.168.0.87:8080/api/serial/reset \
 |---------|-----|
 | "pin not in allowed set" | Use only the BCM pins listed above |
 | Pin stays driven after test | Drive pins HIGH (`1`) to release |
-| **Pi crashes during GPIO reset** | **Only use LOW (`0`) and HIGH (`1`).** Floating pins crash the Pi's dwc_otg USB controller. |
+| Pi crashes during GPIO reset | Ensure pins are driven HIGH (`1`) when not actively pulling LOW |
 | GPIO reset not needed | Board may have onboard auto-download circuit (dual-USB hub board) — use DTR/RTS via JTAG slot instead |
 | Probe shows crash loop output | Board is rebooting from firmware panic, not from GPIO. Erase flash first for clean probe. |

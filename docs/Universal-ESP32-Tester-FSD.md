@@ -832,9 +832,7 @@ without requiring the rapid-reset approach or physical button presses.
 
 Requests for pins outside this set return HTTP 400.
 
-**IMPORTANT — Only use LOW and HIGH:** GPIO pins connected to ESP32 EN or
-BOOT must only be driven LOW (`0`) or HIGH (`1`).  Release = drive HIGH.
-Never use hi-Z — floating pins crash the Pi's dwc_otg USB controller.
+**Pin values:** Only use LOW (`0`) and HIGH (`1`).  Release = drive HIGH.
 
 #### 18.1 Endpoints
 
@@ -1443,9 +1441,7 @@ Step 2: Try USB DTR/RTS reset (fallback)
 
 #### Caveats
 
-1. **Only use LOW and HIGH on EN/BOOT pins.**  The Pi Zero W's dwc_otg USB
-   controller crashes when GPIO lines connected to ESP32 EN/BOOT float.
-   Never use hi-Z.  Release = drive HIGH (`1`).
+1. **Only use LOW (`0`) and HIGH (`1`) on EN/BOOT pins.**  Release = drive HIGH.
 2. **Firmware crash loops** produce continuous `rst:0xc` resets that can mask a
    GPIO-triggered reset.  For reliable probing, first erase flash
    (`esptool.py erase_flash`) so the board sits idle in bootloader, or flash
