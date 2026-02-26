@@ -36,19 +36,48 @@ exposing both JTAG and UART), identify which slot is which:
 Document both slots in the hardware connections table and note which is used for
 flashing vs serial monitoring.
 
-### Step 3: Determine which tester capabilities apply
+### Step 3: Determine which tester services apply
 
-Only include what the project actually needs to test:
+The tester provides these services. Only include what the project actually needs:
 
-| Feature to test | Tester capability | Skill |
-|----------------|-------------------|-------|
-| Firmware boots correctly | Serial reset + monitor for expected output | `esp32-tester-serial` |
-| WiFi provisioning works | `enter-portal` (auto-provisions via captive portal if needed) + AP status check | `esp32-tester-wifi` |
-| OTA updates work | Upload binary + trigger via HTTP relay + monitor logs | `esp32-tester-ota` |
-| BLE interface responds | Scan + connect + write + verify via logs | `esp32-tester-ble` |
-| Boot mode selection | GPIO pin drive during reset | `esp32-tester-gpio` |
-| Runtime behavior | UDP log monitoring | `esp32-tester-udplog` |
-| Crash/panic recovery | Serial monitor for crash output | `esp32-tester-serial` |
+**Serial** (`esp32-tester-serial`)
+- Device discovery — auto-detect slots, hotplug, dual-USB hub boards (JTAG + UART)
+- Remote flashing — `esptool` via RFC2217 over the network
+- Serial reset — DTR/RTS hardware reset, or GPIO reset for boards with wired EN/BOOT
+- Serial monitor — pattern matching on boot output, crash capture
+- Crash-loop recovery — `esptool erase_flash` works even during panic loops on native USB
+
+**WiFi** (`esp32-tester-wifi`)
+- Tester AP — start a SoftAP for the DUT to connect to
+- Captive portal provisioning — `enter-portal` auto-detects if provisioning is needed, joins device's portal, fills in tester AP credentials, submits
+- WiFi scan — verify device's AP is broadcasting
+- HTTP relay — make HTTP requests to devices on the tester's WiFi network (bridges LAN ↔ WiFi)
+- Event monitoring — long-poll for STA_CONNECT / STA_DISCONNECT events
+
+**GPIO** (`esp32-tester-gpio`)
+- Boot mode control — hold BOOT LOW during EN reset to enter download mode
+- Hardware reset — pulse EN LOW/HIGH
+- Button simulation — drive any allowed pin LOW/HIGH
+
+**UDP Logging** (`esp32-tester-udplog`)
+- Receive ESP32 debug logs over WiFi (port 5555)
+- Buffer and filter by source IP, timestamp
+- Essential when USB is occupied (e.g. HID keyboard mode)
+
+**OTA Firmware** (`esp32-tester-ota`)
+- Firmware repository — upload, list, delete .bin files
+- Serve binaries over HTTP for ESP32 OTA clients
+- Trigger OTA on device via HTTP relay
+
+**BLE** (`esp32-tester-ble`)
+- Scan for peripherals, filter by name
+- Connect and write raw bytes to GATT characteristics
+- Test BLE interfaces remotely (one connection at a time)
+
+**Test Automation**
+- Test progress tracking — push live session updates to web portal
+- Human interaction — block test until operator confirms a physical action
+- Activity log — timestamped log of all tester operations
 
 ### Step 4: Write the testing chapter
 
@@ -179,14 +208,14 @@ Check that the testing chapter covers:
 
 ## Tester Capabilities Reference
 
-| Skill | Key endpoints | Tests it enables |
+| Skill | Key endpoints | What it enables |
 |-------|-------------|-----------------|
-| `esp32-tester-serial` | `POST /api/serial/reset`, `/api/serial/monitor` | Boot verification, crash capture, pattern matching |
-| `esp32-tester-wifi` | `POST /api/enter-portal`, `GET /api/wifi/ap_status`, `POST /api/wifi/http` | Provisioning (auto-detects if portal needed), AP connectivity, HTTP relay to device |
-| `esp32-tester-ota` | `POST /api/firmware/upload`, `GET /api/firmware/list` | OTA update test (upload → trigger → verify) |
-| `esp32-tester-ble` | `POST /api/ble/scan`, `/api/ble/connect`, `/api/ble/write` | BLE interface test (scan → connect → send data → check logs) |
-| `esp32-tester-gpio` | `POST /api/gpio/set` | Boot mode test, button simulation |
-| `esp32-tester-udplog` | `GET /api/udplog`, `DELETE /api/udplog` | Runtime log verification, test monitoring |
+| `esp32-tester-serial` | `GET /api/devices`, `POST /api/serial/reset`, `POST /api/serial/monitor` | Device discovery, remote flashing (esptool via RFC2217), boot verification, crash capture, crash-loop recovery |
+| `esp32-tester-wifi` | `POST /api/enter-portal`, `GET /api/wifi/ap_status`, `GET /api/wifi/scan`, `POST /api/wifi/http`, `GET /api/wifi/events` | Captive portal provisioning, AP connectivity, WiFi scan, HTTP relay to device, event monitoring |
+| `esp32-tester-ota` | `POST /api/firmware/upload`, `GET /api/firmware/list`, `POST /api/wifi/http` | Firmware upload/serve, OTA trigger via HTTP relay, update verification |
+| `esp32-tester-ble` | `POST /api/ble/scan`, `POST /api/ble/connect`, `POST /api/ble/write`, `POST /api/ble/disconnect` | BLE scan, connect, GATT write, remote BLE interface testing |
+| `esp32-tester-gpio` | `POST /api/gpio/set`, `GET /api/gpio/status` | Boot mode control, hardware reset, button simulation |
+| `esp32-tester-udplog` | `GET /api/udplog`, `DELETE /api/udplog` | Runtime log capture over WiFi, essential when USB is occupied |
 
 ## Example
 
