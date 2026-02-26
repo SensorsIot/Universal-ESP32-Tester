@@ -58,17 +58,25 @@ ssh pi@192.168.0.87 "udevadm info -q property /dev/ttyACM0 | grep ID_SERIAL"
 
 ## Step 2: Flash via RFC2217
 
-Each slot exposes an RFC2217 URL from `/api/devices`. Use it with esptool:
+Each slot exposes an RFC2217 URL from `/api/devices`. Use it with esptool.
+
+**Baud rate:** Native USB devices (ESP32-S3/C3 `ttyACM`) ignore the baud rate — data transfers at USB speed regardless. The effective throughput is limited by the RFC2217 TCP proxy (~300 kbit/s). UART-bridge devices (`ttyUSB`) respect the baud rate. Use `-b 921600` as a sensible default for both cases.
 
 ```bash
 # Get the RFC2217 URL
 SLOT_URL=$(curl -s http://192.168.0.87:8080/api/devices | jq -r '.slots[0].url')
 
-# Flash firmware
-esptool.py --port "$SLOT_URL" --chip esp32s3 --before=usb_reset write_flash 0x0 firmware.bin
+# Flash firmware (use ?ign_set_control for RFC2217 proxy compatibility)
+esptool.py --port "${SLOT_URL}?ign_set_control" --chip esp32s3 -b 921600 \
+  --before=default_reset --after=hard_reset write_flash \
+  --flash_mode dio --flash_size 4MB --flash_freq 80m \
+  0x0 build/bootloader/bootloader.bin \
+  0x8000 build/partition_table/partition-table.bin \
+  0xf000 build/ota_data_initial.bin \
+  0x20000 build/firmware.bin
 
 # Erase NVS partition
-esptool.py --port "$SLOT_URL" --chip esp32s3 erase_region 0x9000 0x6000
+esptool.py --port "${SLOT_URL}?ign_set_control" --chip esp32s3 erase_region 0x9000 0x6000
 ```
 
 ### esptool flags by device type
