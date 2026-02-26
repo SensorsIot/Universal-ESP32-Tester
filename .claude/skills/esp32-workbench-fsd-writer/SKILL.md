@@ -36,45 +36,56 @@ exposing both JTAG and UART), identify which slot is which:
 Document both slots in the hardware connections table and note which is used for
 flashing vs serial monitoring.
 
-### Step 3: Determine which workbench services apply
+### Step 3: Determine which workbench skills apply
 
-The workbench provides these services. Only include what the project actually needs:
+The workbench offers these capabilities through 8 skills. Only include what the project actually needs:
 
-**Serial** (`esp32-workbench-serial`)
+**Serial Flashing** (`esp32-workbench-serial-flashing`)
 - Device discovery — auto-detect slots, hotplug, dual-USB hub boards (JTAG + UART)
 - Remote flashing — `esptool` via RFC2217 over the network
-- Serial reset — DTR/RTS hardware reset, or GPIO reset for boards with wired EN/BOOT
-- Serial monitor — pattern matching on boot output, crash capture
+- GPIO download mode — enter download mode via Pi GPIO when DTR/RTS is unavailable
 - Crash-loop recovery — `esptool erase_flash` works even during panic loops on native USB
+- Flapping recovery — handling USB connection storms from empty/corrupt flash
+
+**Serial Logging** (`esp32-workbench-serial-logging`)
+- Serial monitor — pattern matching on boot output, crash capture, regex with timeout
+- Serial reset — DTR/RTS hardware reset with boot output capture
+- UDP log receiver — non-blocking debug log collection over WiFi (port 5555)
+- Activity log — timestamped log of all workbench operations
 
 **WiFi** (`esp32-workbench-wifi`)
-- Workbench AP — start a SoftAP for the DUT to connect to
+- Workbench AP — start/stop a SoftAP for the DUT to connect to
 - Captive portal provisioning — `enter-portal` auto-detects if provisioning is needed, joins device's portal, fills in workbench AP credentials, submits
+- WiFi on/off testing — stop/start AP to test device WiFi disconnect/reconnect behavior
 - WiFi scan — verify device's AP is broadcasting
-- HTTP relay — make HTTP requests to devices on the workbench's WiFi network (bridges LAN ↔ WiFi)
+- HTTP relay — make HTTP requests to devices on the workbench's WiFi network
 - Event monitoring — long-poll for STA_CONNECT / STA_DISCONNECT events
+- Mode switching — toggle between wifi-testing and serial-interface modes
 
 **GPIO** (`esp32-workbench-gpio`)
 - Boot mode control — hold BOOT LOW during EN reset to enter download mode
 - Hardware reset — pulse EN LOW/HIGH
 - Button simulation — drive any allowed pin LOW/HIGH
-
-**UDP Logging** (`esp32-workbench-udplog`)
-- Receive ESP32 debug logs over WiFi (port 5555)
-- Buffer and filter by source IP, timestamp
-- Essential when USB is occupied (e.g. HID keyboard mode)
+- GPIO probe — auto-detect if board has EN/BOOT wired to Pi GPIOs
 
 **OTA Firmware** (`esp32-workbench-ota`)
 - Firmware repository — upload, list, delete .bin files
 - Serve binaries over HTTP for ESP32 OTA clients
 - Trigger OTA on device via HTTP relay
+- Monitor OTA progress via UDP logs or serial monitor
+
+**MQTT Broker** (`esp32-workbench-mqtt`)
+- Start/stop an MQTT broker (mosquitto) on the workbench
+- Test MQTT client connect/disconnect/reconnect behavior
+- Test combined WiFi + MQTT failure scenarios
 
 **BLE** (`esp32-workbench-ble`)
 - Scan for peripherals, filter by name
 - Connect and write raw bytes to GATT characteristics
 - Test BLE interfaces remotely (one connection at a time)
+- Nordic UART Service (NUS) support
 
-**Test Automation**
+**Test Automation** (`esp32-workbench-test`)
 - Test progress tracking — push live session updates to web portal
 - Human interaction — block test until operator confirms a physical action
 - Activity log — timestamped log of all workbench operations
@@ -206,16 +217,18 @@ Check that the testing chapter covers:
 - [ ] Troubleshooting covers the most likely test failure modes
 - [ ] Only workbench features the project actually uses are included
 
-## Workbench Capabilities Reference
+## Workbench Skills Reference
 
 | Skill | Key endpoints | What it enables |
 |-------|-------------|-----------------|
-| `esp32-workbench-serial` | `GET /api/devices`, `POST /api/serial/reset`, `POST /api/serial/monitor` | Device discovery, remote flashing (esptool via RFC2217), boot verification, crash capture, crash-loop recovery |
-| `esp32-workbench-wifi` | `POST /api/enter-portal`, `GET /api/wifi/ap_status`, `GET /api/wifi/scan`, `POST /api/wifi/http`, `GET /api/wifi/events` | Captive portal provisioning, AP connectivity, WiFi scan, HTTP relay to device, event monitoring |
-| `esp32-workbench-ota` | `POST /api/firmware/upload`, `GET /api/firmware/list`, `POST /api/wifi/http` | Firmware upload/serve, OTA trigger via HTTP relay, update verification |
-| `esp32-workbench-ble` | `POST /api/ble/scan`, `POST /api/ble/connect`, `POST /api/ble/write`, `POST /api/ble/disconnect` | BLE scan, connect, GATT write, remote BLE interface testing |
-| `esp32-workbench-gpio` | `POST /api/gpio/set`, `GET /api/gpio/status` | Boot mode control, hardware reset, button simulation |
-| `esp32-workbench-udplog` | `GET /api/udplog`, `DELETE /api/udplog` | Runtime log capture over WiFi, essential when USB is occupied |
+| `esp32-workbench-serial-flashing` | `GET /api/devices`, `POST /api/serial/reset` | Device discovery, remote flashing (esptool via RFC2217), GPIO download mode, crash-loop recovery |
+| `esp32-workbench-serial-logging` | `POST /api/serial/monitor`, `GET /api/udplog` | Serial monitor with pattern matching, UDP log collection, boot/crash capture |
+| `esp32-workbench-wifi` | `POST /api/enter-portal`, `GET /api/wifi/ap_status`, `GET /api/wifi/scan`, `POST /api/wifi/http`, `GET /api/wifi/events` | Captive portal provisioning, AP control, WiFi on/off testing, HTTP relay, event monitoring |
+| `esp32-workbench-gpio` | `POST /api/gpio/set`, `GET /api/gpio/status` | Boot mode control, hardware reset, button simulation, GPIO probe |
+| `esp32-workbench-ota` | `POST /api/firmware/upload`, `GET /api/firmware/list`, `POST /api/wifi/http` | Firmware upload/serve, OTA trigger via HTTP relay |
+| `esp32-workbench-mqtt` | `POST /api/mqtt/start`, `POST /api/mqtt/stop`, `GET /api/mqtt/status` | MQTT broker on/off, client connect/disconnect testing |
+| `esp32-workbench-ble` | `POST /api/ble/scan`, `POST /api/ble/connect`, `POST /api/ble/write`, `POST /api/ble/disconnect` | BLE scan, connect, GATT write, remote BLE testing |
+| `esp32-workbench-test` | `POST /api/test/update`, `GET /api/test/progress`, `POST /api/human-interaction` | Test progress tracking, human interaction, activity log |
 
 ## Example
 

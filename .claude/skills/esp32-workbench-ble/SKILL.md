@@ -17,6 +17,8 @@ Base URL: `http://192.168.0.87:8080`
 | POST | `/api/ble/disconnect` | Disconnect current device |
 | GET | `/api/ble/status` | Connection state and device info |
 
+One BLE connection at a time.
+
 ## Examples
 
 ```bash
@@ -28,7 +30,7 @@ curl -X POST http://192.168.0.87:8080/api/ble/scan \
 # Scan with name filter
 curl -X POST http://192.168.0.87:8080/api/ble/scan \
   -H 'Content-Type: application/json' \
-  -d '{"timeout": 5, "name_filter": "MyESP32"}'
+  -d '{"timeout": 5, "name_filter": "iOS-Keyboard"}'
 
 # Connect by MAC address
 curl -X POST http://192.168.0.87:8080/api/ble/connect \
@@ -67,6 +69,12 @@ curl -X POST http://192.168.0.87:8080/api/ble/disconnect
    - `POST /api/ble/scan` with short timeout and name filter
    - Check `devices` array in response
 
+3. **Send binary command protocol:**
+   - Connect to device
+   - Encode command bytes as hex (e.g., `0x02` + "Hello" = `0248656c6c6f`)
+   - Write to NUS RX characteristic
+   - Monitor device response via serial or UDP logs (see esp32-workbench-serial-logging)
+
 ## Troubleshooting
 
 | Problem | Fix |
@@ -75,3 +83,4 @@ curl -X POST http://192.168.0.87:8080/api/ble/disconnect
 | Scan returns empty | Increase timeout; check device is advertising |
 | Connect fails (409) | Already connected — disconnect first |
 | Write fails "invalid hex data" | Data must be hex string (e.g., `"48656c6c6f"` for "Hello") |
+| Device not found by name | Check exact advertised name; BLE names are case-sensitive |
