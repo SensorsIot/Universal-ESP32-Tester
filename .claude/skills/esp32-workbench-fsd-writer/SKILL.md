@@ -1,13 +1,28 @@
 ---
 name: esp32-tester-fsd-writer
-description: Reads a project's FSD and adds a testing chapter — how to verify each feature using the Universal ESP32 Tester, with hardware connections, test procedures, and troubleshooting. Triggers on "FSD", "write FSD", "enhance FSD", "add tester to FSD", "add testing", "new project", "set up project".
+description: Reads a project's FSD and integrates workbench infrastructure, then writes the Workbench, Testing, and Appendix chapters. Triggers on "FSD", "write FSD", "enhance FSD", "add tester to FSD", "add testing", "new project", "set up project".
 ---
 
-# FSD Writer — Integrate Workbench + Add Testing Chapter
+# FSD Writer — Integrate Workbench + Write FSD Chapters
 
-This is a procedure. When triggered, read the project's existing FSD, integrate the firmware with the workbench infrastructure (UDP logging, OTA, BLE command handling, strategic log messages), then add a testing chapter.
+This is a procedure. When triggered, read the project's existing FSD, integrate the firmware with the workbench infrastructure (UDP logging, OTA, BLE command handling, strategic log messages), then write the operational, testing, and appendix chapters.
 
-The workbench provides the **test infrastructure**. This skill adds both the **firmware integration** (modules the workbench needs to interact with the device) and the **test plan** (how to verify each feature).
+The workbench provides the **test infrastructure**. This skill adds both the **firmware integration** (modules the workbench needs to interact with the device) and the **FSD documentation** (operational guide, test plan, troubleshooting).
+
+## FSD Document Structure
+
+Every FSD produced by this skill must follow this structure:
+
+```
+# Project FSD
+## Goal                             ← what & why (pre-existing)
+## Functionality                    ← features, phases, constants (pre-existing)
+## Working with the ESP32 Workbench ← operational: how to flash, provision, use BLE/OTA
+## Testing                          ← test cases by phase, procedures, pass/fail criteria
+## Appendix                         ← logging strategy, troubleshooting
+```
+
+Steps 1–7 handle firmware integration. Steps 8–12 write the FSD chapters.
 
 ## Template Reference
 
@@ -177,11 +192,11 @@ Ensure the canonical init order:
 
 The exact implementation can vary, but the order must be: NVS → netif → UDP → WiFi → BLE → cmd handler → heartbeat → "Init complete".
 
-### Step 8: Write FSD testing chapter
+### Step 8: Write "Working with the ESP32 Workbench" chapter
 
-Add a `## Testing with the ESP32 Workbench` chapter to the FSD containing:
+Add a `## Working with the ESP32 Workbench` chapter to the FSD. This is a standalone **operations guide** — how to interact with the device through the workbench. It contains no test cases.
 
-#### 8a. Hardware connections table
+#### 8a. Hardware setup
 
 Query the workbench for hardware details:
 ```bash
@@ -195,162 +210,137 @@ Record: slot label, TCP port, RFC2217 URL, device state.
 - Espressif USB-Serial/JTAG (`303a:1001`) → **JTAG slot** (flash here)
 - CH340/CP2102 UART bridge (`1a86:55d3` / `10c4:ea60`) → **UART slot** (console output here)
 
-Document both slots in the hardware connections table.
+Write a hardware table and a project-specific values table:
 
-For single-USB boards:
 ```markdown
-### Test Hardware
+### Hardware Setup
 
 | What | Where |
 |------|-------|
 | ESP32 USB | Workbench slot <N>, serial at `rfc2217://192.168.0.87:<PORT>` |
-| Workbench GPIO 17 | ESP32 EN/RST (hardware reset) |
-| Workbench GPIO 18 | ESP32 boot-select |
-| ... | (project-specific connections) |
+| Workbench host | `192.168.0.87:8080` |
+| UDP log sink | `192.168.0.87:5555` |
+| OTA firmware URL | `http://192.168.0.87:8080/firmware/<project>/<project>.bin` |
+
+#### Project-Specific Values
+
+| Value | Setting |
+|-------|---------|
+| WiFi portal SSID | `<SSID>` (device SoftAP name when no credentials stored) |
+| Workbench AP SSID | `WB-TestAP` |
+| Workbench AP password | `wbtestpass` |
+| BLE device name | `<NAME>` |
+| NVS namespace | `<NS>` |
+| NUS RX characteristic | `6e400002-b5a3-f393-e0a9-e50e24dcca9e` |
 ```
 
-For dual-USB hub boards:
-```markdown
-### Test Hardware
+**Important:** Fill in all actual values from the firmware source — never leave `<placeholder>` in the final FSD.
 
-| What | Where |
-|------|-------|
-| ESP32 JTAG | Workbench slot <N> (Espressif USB JTAG), `rfc2217://192.168.0.87:<PORT>` — flash here |
-| ESP32 UART | Workbench slot <M> (CH340/UART bridge), `rfc2217://192.168.0.87:<PORT>` — serial console here |
-| Reset/Boot | Via DTR/RTS on JTAG slot (onboard auto-download circuit) |
-| ... | (project-specific connections) |
-```
+#### 8b. Flashing
 
-Include project-specific constants. **For WiFi provisioning, always document all three values:**
-- Device's captive portal SoftAP name (`portal_ssid`)
-- Workbench AP SSID (`ssid`) — what the workbench fills into the device's portal form
-- Workbench AP password (`password`) — what the workbench fills into the device's portal form
+Document the project-specific esptool command for serial flashing via RFC2217. Reference the `esp32-workbench-serial-flashing` skill for download mode, crash-loop recovery, and dual-USB hub details.
 
-#### 8b. WiFi provisioning procedure
+#### 8c. WiFi provisioning
 
-WiFi provisioning is a prerequisite for most tests (OTA, UDP logs, HTTP status). Document it as the **first test** and reference it from all tests that need WiFi.
+WiFi provisioning is a prerequisite for most operations (OTA, UDP logs, HTTP endpoints). Document it as a complete two-phase procedure with filled-in project values.
 
 **Three values are involved — document all three clearly:**
 
-| Value | What it is | Where it's defined | Example |
-|-------|-----------|-------------------|---------|
-| Device portal SSID | The SoftAP name the device broadcasts when it has no WiFi credentials | `wifi_prov.c` → `AP_SSID` | `"KB-Setup"` |
-| Workbench AP SSID | The WiFi network the workbench creates for the device to join | Passed in `enter-portal` request | `"WB-TestAP"` |
-| Workbench AP password | Password for the workbench's AP | Passed in `enter-portal` request | `"wbtestpass"` |
+| Value | What it is | Where it's defined |
+|-------|-----------|-------------------|
+| Device portal SSID | The SoftAP name the device broadcasts when it has no WiFi credentials | `wifi_prov.c` → `AP_SSID` |
+| Workbench AP SSID | The WiFi network the workbench creates for the device to join | Passed in `enter-portal` request |
+| Workbench AP password | Password for the workbench's AP | Passed in `enter-portal` request |
 
-**The provisioning flow has two phases — always document both:**
+**Always document both phases:**
+1. **Ensure device is in AP mode** — BLE WiFi reset if previously provisioned, skip if freshly flashed
+2. **Provision via captive portal** — `enter-portal` with all three values filled in, serial monitor for confirmation
+
+Include the enter-portal failure diagnostic steps (check AP mode, check WiFi scan, check activity log).
+
+#### 8d. BLE commands
+
+Document how to scan, connect, and send each opcode. Write a command reference table:
 
 ```markdown
-### WiFi Provisioning
-
-The device starts in one of two states:
-- **AP mode** (no stored credentials) — device broadcasts its portal SSID
-- **STA mode** (has stored credentials) — device tries to connect to stored WiFi
-
-#### Phase 1: Ensure device is in AP mode
-
-If the device was previously provisioned, erase its stored credentials first:
-
-```bash
-# Connect BLE
-curl -s -X POST http://192.168.0.87:8080/api/ble/connect \
-  -H 'Content-Type: application/json' \
-  -d '{"address":"<DEVICE_BLE_MAC>"}'
-
-# Send CMD_WIFI_RESET (0x11) — erases NVS credentials, device reboots into AP mode
-curl -s -X POST http://192.168.0.87:8080/api/ble/write \
-  -H 'Content-Type: application/json' \
-  -d '{"characteristic":"6e400002-b5a3-f393-e0a9-e50e24dcca9e","data":"11"}'
-
-# Wait for reboot, then verify AP mode via serial
-curl -s -X POST http://192.168.0.87:8080/api/serial/monitor \
-  -H 'Content-Type: application/json' \
-  -d '{"slot":"<SLOT>","pattern":"AP mode","timeout":10}'
+| Opcode | Hex example | Description | Expected log |
+|--------|-------------|-------------|--------------|
+| `0x01 <count>` | `0103` | Backspace | `"BACKSPACE x3"` |
+| ... | ... | ... | ... |
 ```
 
-Skip this phase if the device was just freshly flashed (NVS is empty → AP mode).
+Include one example `curl` write command. This is reference material — test cases go in the Testing chapter.
 
-#### Phase 2: Provision via captive portal
+#### 8e. OTA updates
 
-```bash
-# enter-portal is async — returns immediately
-curl -s -X POST http://192.168.0.87:8080/api/enter-portal \
-  -H 'Content-Type: application/json' \
-  -d '{"portal_ssid":"<DEVICE_PORTAL_SSID>","ssid":"WB-TestAP","password":"wbtestpass"}'
+Document the complete OTA workflow:
+1. Upload firmware to the workbench (`/api/firmware/upload`)
+2. Trigger OTA via BLE (`CMD_OTA` opcode) or via HTTP (`POST /ota` through relay)
+3. Monitor result via serial
 
-# Wait for device to reboot and connect (the portal submit triggers a reboot)
-# Use serial monitor to confirm the device rebooted and connected
-curl -s -X POST http://192.168.0.87:8080/api/serial/monitor \
-  -H 'Content-Type: application/json' \
-  -d '{"slot":"<SLOT>","pattern":"STA got IP","timeout":30}'
+#### 8f. HTTP endpoints
 
-# Verify device appears on workbench AP
-curl -s http://192.168.0.87:8080/api/wifi/ap_status
-```
+Document the device's HTTP endpoints and how to reach them via the workbench HTTP relay (`/api/wifi/http`). Typical endpoints: `/status`, `/ota`.
 
-**Success:** Serial shows `"STA got IP: <ip>"` and `ap_status` shows the device as a connected station.
+#### 8g. Log monitoring
 
-**If enter-portal fails** (device doesn't connect within 30s):
-1. Check serial: is the device in AP mode? (`"AP mode: SSID='<DEVICE_PORTAL_SSID>'"`)
-2. Check WiFi scan: does the workbench see the device's portal AP? (`GET /api/wifi/scan`)
-3. Check activity log for errors: `GET /api/log`
-```
+Document the two log methods (serial monitor and UDP logs) with example commands. This is the "how" — when to use which method goes in the Appendix.
 
-**Important:** The FSD writer must fill in the actual values — never leave `<DEVICE_PORTAL_SSID>` as a placeholder. Extract from `wifi_prov.c` → `AP_SSID`.
+### Step 9: Write "Testing" chapter
 
-#### 8c. Test procedures for each feature
+Add a `## Testing` chapter to the FSD. This chapter contains **only test cases** — verification tables with pass/fail criteria. It does not repeat operational procedures from the Workbench chapter.
 
-For every testable feature in the FSD, write a concrete test procedure with exact curl commands using project-specific values. Each procedure must answer:
-- **What prerequisite state** the device must be in (most tests require "WiFi provisioned" — reference the provisioning procedure above)
-- **What to do** (exact curl commands)
-- **What success looks like** (expected response or log output)
+#### 9a. Phase verification tables
 
-#### 8d. Phase verification tables
-
-For each implementation phase, add a table mapping every deliverable to a test:
+For each implementation phase, write a table:
 
 ```markdown
 ### Phase N Verification
 
 | Step | Feature | Test procedure | Success criteria |
 |------|---------|---------------|-----------------|
-| 1 | <feature> | <which workbench API + what to send> | <what response/log to expect> |
+| 1 | <feature> | <brief description, reference workbench chapter> | <expected output> |
 ```
 
-Every step must have a concrete, executable test — no vague "verify it works."
+**Rules:**
+- Every FSD feature must appear in exactly one phase verification table
+- Test procedures **reference** operations from the Workbench chapter (e.g., "Provision WiFi (see WiFi Provisioning)") — they don't duplicate curl commands
+- Every step must have concrete, observable success criteria — no vague "verify it works"
+- Include the hex data for BLE commands inline (e.g., "BLE write `024869`") since that's test-specific
 
-#### 8e. Logging strategy
+### Step 10: Write "Appendix"
 
-Document which log method to use for each feature:
+Add a `## Appendix` chapter to the FSD.
+
+#### 10a. Logging strategy
+
+Document when to use each log method:
 
 ```markdown
-### Logging for Tests
+### Logging Strategy
 
 | Situation | Method | Why |
 |-----------|--------|-----|
-| Verify boot output | Serial monitor (`/api/serial/monitor`) | Captures UART before WiFi is up |
-| Monitor runtime behavior | UDP logs (`/api/udplog`) | Non-blocking, works while device runs |
+| Verify boot output | Serial monitor | Captures UART before WiFi is up |
+| Monitor BLE commands | UDP logs | Non-blocking, works while device runs |
 | Capture crash output | Serial monitor | Only UART captures panic handler output |
 ```
 
-#### 8f. Troubleshooting
+#### 10b. Troubleshooting
 
-Add failure-to-diagnostic mapping:
+Add a failure-to-diagnostic-to-fix mapping table covering likely failure modes:
 
 ```markdown
-### Test Troubleshooting
+### Troubleshooting
 
 | Test failure | Diagnostic | Fix |
 |-------------|-----------|-----|
-| Serial monitor shows no output | Check `/api/devices` for slot state | Device may be absent or flapping |
-| enter-portal times out | Serial monitor — is device in AP mode? | Device has stored credentials → BLE `CMD_WIFI_RESET (0x11)` first |
-| enter-portal succeeds but ap_status empty | Serial for `"STA got IP"` | Device connected then disconnected — check workbench AP is stable |
-| Device keeps retrying STA | Serial shows `"STA disconnect, retry"` | Wrong credentials stored → BLE `CMD_WIFI_RESET (0x11)` to erase and re-provision |
-| OTA test fails | Check `/api/wifi/ap_status` | Device not on WiFi — provision first |
-| BLE test finds no device | Serial monitor for boot errors | Firmware may have crashed before BLE init |
+| Serial monitor shows no output | Check `/api/devices` | Device absent or flapping |
+| enter-portal times out | Check serial for AP mode | BLE `CMD_WIFI_RESET` first |
+| ... | ... | ... |
 ```
 
-### Step 9: Build verification
+### Step 11: Build verification
 
 ```bash
 cd <project-root> && idf.py build
@@ -361,7 +351,7 @@ Fix any compilation errors. Common issues:
 - Missing `#include` directives
 - Function signature mismatches between header and implementation
 
-### Step 10: Summary report
+### Step 12: Summary report
 
 List what was added/changed:
 - New files copied from workbench-test (with customizations noted)
@@ -373,17 +363,34 @@ List what was added/changed:
 
 After completing all steps, verify:
 
+**Firmware integration (Steps 1–7):**
 - [ ] Every module needed by the feature checklist exists
 - [ ] Every required log pattern is present
 - [ ] CMakeLists.txt has all sources and dependencies
 - [ ] app_main.c follows the canonical init order
 - [ ] "Init complete" is the last log message in app_main()
-- [ ] The testing chapter covers every FSD feature
-- [ ] Every implementation phase has a verification table
+
+**Working with the Workbench chapter (Step 8):**
+- [ ] Hardware table documents all slots (including dual-USB if applicable)
 - [ ] All project-specific values are filled in (no `<placeholder>` the AI must guess)
-- [ ] WiFi provisioning tests include all three values: `portal_ssid`, `ssid`, `password`
+- [ ] WiFi provisioning includes all three values: `portal_ssid`, `ssid`, `password`
+- [ ] WiFi provisioning documents both phases (ensure AP mode + provision via portal)
+- [ ] BLE command reference table covers every opcode
+- [ ] OTA workflow covers upload + both trigger methods (BLE and HTTP)
+- [ ] HTTP endpoints documented with relay examples
+- [ ] Chapter works as a standalone operations guide
+
+**Testing chapter (Step 9):**
+- [ ] Every FSD feature appears in a phase verification table
+- [ ] Every implementation phase has a verification table
+- [ ] Test procedures reference (not duplicate) the Workbench chapter
+- [ ] Every test step has concrete success criteria
+
+**Appendix (Step 10):**
 - [ ] Logging strategy explains when to use serial monitor vs UDP logs
 - [ ] Troubleshooting covers likely failure modes
+
+**Build (Step 11):**
 - [ ] Project builds cleanly with `idf.py build`
 
 ## Workbench Skills Reference
