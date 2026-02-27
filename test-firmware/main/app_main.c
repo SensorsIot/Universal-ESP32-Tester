@@ -30,12 +30,12 @@ void app_main(void)
     /* 1. NVS */
     nvs_store_init();
 
-    /* 2. UDP debug logging — early, captures all subsequent logs */
-    udp_log_init("192.168.0.87", 5555);
-
-    /* 3. Network stack */
+    /* 2. Network stack — must be up before UDP logging */
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    /* 3. UDP debug logging — captures all subsequent logs */
+    udp_log_init("192.168.0.87", 5555);
 
     /* 4. WiFi — STA (stored creds) or AP (captive portal) */
     wifi_prov_init();
@@ -47,7 +47,7 @@ void app_main(void)
     http_server_start();
 
     /* 7. Heartbeat — periodic log to confirm firmware is alive */
-    xTaskCreate(heartbeat_task, "heartbeat", 2048, NULL, 1, NULL);
+    xTaskCreate(heartbeat_task, "heartbeat", 4096, NULL, 1, NULL);
 
     ESP_LOGI(TAG, "Init complete, running event-driven");
 }

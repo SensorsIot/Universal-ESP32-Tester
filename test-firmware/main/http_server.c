@@ -67,7 +67,8 @@ esp_err_t http_server_start(void)
 {
     httpd_handle_t server = NULL;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.server_port = 80;
+    config.server_port = 8080;
+    config.ctrl_port = 32769;   /* must differ from portal server's default 32768 */
 
     esp_err_t err = httpd_start(&server, &config);
     if (err != ESP_OK) {
@@ -89,6 +90,6 @@ esp_err_t http_server_start(void)
     httpd_register_uri_handler(server, &ota_post);
     httpd_register_uri_handler(server, &wifi_reset_post);
 
-    ESP_LOGI(TAG, "HTTP server started on port 80 (/status, /ota, /wifi-reset)");
+    ESP_LOGI(TAG, "HTTP server started on port 8080 (/status, /ota, /wifi-reset)");
     return ESP_OK;
 }
