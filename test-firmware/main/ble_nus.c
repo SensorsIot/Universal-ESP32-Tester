@@ -1,4 +1,7 @@
 #include "ble_nus.h"
+
+#if CONFIG_BT_ENABLED
+
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "nimble/nimble_port.h"
@@ -239,3 +242,5 @@ bool ble_nus_is_connected(void)
 {
     return s_conn_handle != BLE_HS_CONN_HANDLE_NONE;
 }
+
+#endif /* CONFIG_BT_ENABLED */

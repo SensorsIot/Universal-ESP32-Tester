@@ -22,7 +22,6 @@ extern const char portal_html_end[]   asm("_binary_portal_html_end");
 
 static int s_retry_count = 0;
 static bool s_sta_connected = false;
-static bool s_ap_mode = false;
 static httpd_handle_t s_server = NULL;
 
 /* ── Event handlers ────────────────────────────────────────────── */
@@ -203,14 +202,14 @@ static esp_err_t start_sta(const char *ssid, const char *password)
     wifi_config_t wifi_cfg = {};
     strncpy((char *)wifi_cfg.sta.ssid, ssid, sizeof(wifi_cfg.sta.ssid) - 1);
     strncpy((char *)wifi_cfg.sta.password, password, sizeof(wifi_cfg.sta.password) - 1);
-    wifi_cfg.sta.threshold.authmode = WIFI_AUTH_OPEN;   /* accept any auth */
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
-    ESP_ERROR_CHECK(esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "STA mode, connecting to '%s'", ssid);
+    wifi_mode_t mode;
+    esp_wifi_get_mode(&mode);
+    ESP_LOGI(TAG, "STA mode=%d, connecting to '%s' (pass len=%d)", mode, ssid, (int)strlen(password));
     return ESP_OK;
 }
 
@@ -218,18 +217,21 @@ static esp_err_t start_sta(const char *ssid, const char *password)
 
 static esp_err_t start_ap(void)
 {
-    s_ap_mode = true;
     esp_netif_create_default_wifi_ap();
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
+                                                        ESP_EVENT_ANY_ID,
+                                                        &wifi_event_handler,
+                                                        NULL, NULL));
 
     wifi_config_t wifi_cfg = {
         .ap = {
             .ssid = AP_SSID,
             .ssid_len = strlen(AP_SSID),
+            .channel = 1,
             .max_connection = 4,
             .authmode = WIFI_AUTH_OPEN,
         },
@@ -239,24 +241,9 @@ static esp_err_t start_ap(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    /* DHCP Option 114 for iOS captive portal detection */
-    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-    if (netif) {
-        esp_netif_ip_info_t ip_info;
-        esp_netif_get_ip_info(netif, &ip_info);
-        char ip_str[16];
-        inet_ntoa_r(ip_info.ip.addr, ip_str, sizeof(ip_str));
+    ESP_LOGI(TAG, "AP started: SSID='%s' channel=1 auth=OPEN", AP_SSID);
 
-        char uri[32];
-        snprintf(uri, sizeof(uri), "http://%s", ip_str);
-
-        esp_netif_dhcps_stop(netif);
-        esp_netif_dhcps_option(netif, ESP_NETIF_OP_SET,
-                               ESP_NETIF_CAPTIVEPORTAL_URI, uri, strlen(uri));
-        esp_netif_dhcps_start(netif);
-    }
-
-    /* Suppress noisy HTTP server warnings from captive portal redirects */
+    /* Captive portal HTTP + DNS */
     esp_log_level_set("httpd_uri", ESP_LOG_ERROR);
     esp_log_level_set("httpd_txrx", ESP_LOG_ERROR);
     esp_log_level_set("httpd_parse", ESP_LOG_ERROR);
@@ -299,7 +286,3 @@ bool wifi_prov_is_connected(void)
     return s_sta_connected;
 }
 
-bool wifi_prov_is_ap_mode(void)
-{
-    return s_ap_mode;
-}
