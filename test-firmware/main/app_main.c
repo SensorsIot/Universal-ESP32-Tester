@@ -40,13 +40,21 @@ void app_main(void)
     /* 4. WiFi — STA (stored creds) or AP (captive portal) */
     wifi_prov_init();
 
-    /* 5. BLE — NUS advertisement (no command handler) */
+    /* 5. In STA mode, wait for WiFi before starting BLE to avoid coexistence
+     *    conflicts during association. In AP mode, start BLE immediately. */
+    if (!wifi_prov_is_ap_mode()) {
+        ESP_LOGI(TAG, "Waiting for WiFi STA connection before starting BLE...");
+        for (int i = 0; i < 150 && !wifi_prov_is_connected(); i++)
+            vTaskDelay(pdMS_TO_TICKS(100));   /* up to 15s */
+    }
+
+    /* 6. BLE — NUS advertisement (no command handler) */
     ble_nus_init();
 
-    /* 6. HTTP server — /status, /ota, /wifi-reset (only useful in STA mode) */
+    /* 7. HTTP server — /status, /ota, /wifi-reset */
     http_server_start();
 
-    /* 7. Heartbeat — periodic log to confirm firmware is alive */
+    /* 8. Heartbeat — periodic log to confirm firmware is alive */
     xTaskCreate(heartbeat_task, "heartbeat", 4096, NULL, 1, NULL);
 
     ESP_LOGI(TAG, "Init complete, running event-driven");
