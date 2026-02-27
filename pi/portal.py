@@ -926,7 +926,7 @@ def _do_enter_portal(portal_ssid: str, wifi_ssid: str, wifi_password: str,
     try:
         form_data = urllib.parse.urlencode({
             "ssid": wifi_ssid,
-            "pass": wifi_password,
+            "password": wifi_password,
         }).encode("utf-8")
         import base64
         body_b64 = base64.b64encode(form_data).decode("ascii")

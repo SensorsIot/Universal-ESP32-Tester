@@ -1,75 +1,61 @@
-/* ── Vanilla softAP test — isolate AP visibility issue ──────────
- * This is a copy of the Espressif softAP example, built inside our
- * project (same sdkconfig / partition table).  If the AP is visible,
- * the problem is in our modules; if not, it's in the build config.
- */
-
-#include <string.h>
+#include "esp_log.h"
+#include "esp_netif.h"
+#include "esp_event.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "esp_mac.h"
-#include "esp_wifi.h"
-#include "esp_event.h"
-#include "esp_log.h"
-#include "nvs_flash.h"
+#include "nvs_store.h"
+#include "udp_log.h"
+#include "wifi_prov.h"
+#include "ble_nus.h"
+#include "http_server.h"
 
 static const char *TAG = "app_main";
 
-static void wifi_event_handler(void *arg, esp_event_base_t event_base,
-                               int32_t event_id, void *event_data)
+#define FW_VERSION "0.1.0"
+
+static void heartbeat_task(void *arg)
 {
-    if (event_id == WIFI_EVENT_AP_STACONNECTED) {
-        wifi_event_ap_staconnected_t *event = event_data;
-        ESP_LOGI(TAG, "station " MACSTR " join, AID=%d",
-                 MAC2STR(event->mac), event->aid);
-    } else if (event_id == WIFI_EVENT_AP_STADISCONNECTED) {
-        wifi_event_ap_stadisconnected_t *event = event_data;
-        ESP_LOGI(TAG, "station " MACSTR " leave, AID=%d, reason=%d",
-                 MAC2STR(event->mac), event->aid, event->reason);
+    uint32_t tick = 0;
+    while (1) {
+        ESP_LOGI(TAG, "heartbeat %"PRIu32" | wifi=%d ble=%d",
+                 tick++, wifi_prov_is_connected(), ble_nus_is_connected());
+        vTaskDelay(pdMS_TO_TICKS(10000));
     }
-}
-
-static void wifi_init_softap(void)
-{
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_ap();
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                        ESP_EVENT_ANY_ID,
-                                                        &wifi_event_handler,
-                                                        NULL, NULL));
-
-    wifi_config_t wifi_config = {
-        .ap = {
-            .ssid = "WB-Test-Setup",
-            .ssid_len = strlen("WB-Test-Setup"),
-            .channel = 1,
-            .password = "",
-            .max_connection = 4,
-            .authmode = WIFI_AUTH_OPEN,
-        },
-    };
-
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
-    ESP_ERROR_CHECK(esp_wifi_start());
-
-    ESP_LOGI(TAG, "softAP started. SSID: WB-Test-Setup, channel: 1");
 }
 
 void app_main(void)
 {
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
+    ESP_LOGI(TAG, "=== Workbench Test Firmware v%s ===", FW_VERSION);
 
-    ESP_LOGI(TAG, "=== Vanilla softAP test ===");
-    wifi_init_softap();
+    /* 1. NVS */
+    nvs_store_init();
+
+    /* 2. Network stack — must be up before UDP logging */
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    /* 3. UDP debug logging — captures all subsequent logs */
+    udp_log_init("192.168.0.87", 5555);
+
+    /* 4. WiFi — STA (stored creds) or AP (captive portal) */
+    wifi_prov_init();
+
+    /* 5. In STA mode, wait for WiFi before starting BLE to avoid coexistence
+     *    conflicts during association. In AP mode, start BLE immediately. */
+    if (!wifi_prov_is_ap_mode()) {
+        ESP_LOGI(TAG, "Waiting for WiFi STA connection before starting BLE...");
+        for (int i = 0; i < 150 && !wifi_prov_is_connected(); i++)
+            vTaskDelay(pdMS_TO_TICKS(100));   /* up to 15s */
+    }
+
+    /* 6. BLE — NUS advertisement (no command handler) */
+    ble_nus_init();
+
+    /* 7. HTTP server — /status, /ota, /wifi-reset */
+    http_server_start();
+
+    /* 8. Heartbeat — periodic log to confirm firmware is alive */
+    xTaskCreate(heartbeat_task, "heartbeat", 4096, NULL, 1, NULL);
+
+    ESP_LOGI(TAG, "Init complete, running event-driven");
 }

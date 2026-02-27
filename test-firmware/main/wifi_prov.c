@@ -22,6 +22,7 @@ extern const char portal_html_end[]   asm("_binary_portal_html_end");
 
 static int s_retry_count = 0;
 static bool s_sta_connected = false;
+static bool s_ap_mode = false;
 static httpd_handle_t s_server = NULL;
 
 /* ── Event handlers ────────────────────────────────────────────── */
@@ -270,6 +271,7 @@ esp_err_t wifi_prov_init(void)
     }
 
     ESP_LOGI(TAG, "No WiFi credentials, starting AP provisioning");
+    s_ap_mode = true;
     return start_ap();
 }
 
@@ -284,5 +286,10 @@ void wifi_prov_reset(void)
 bool wifi_prov_is_connected(void)
 {
     return s_sta_connected;
+}
+
+bool wifi_prov_is_ap_mode(void)
+{
+    return s_ap_mode;
 }
 

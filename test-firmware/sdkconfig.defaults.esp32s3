@@ -1,5 +1,5 @@
 # Target
 CONFIG_IDF_TARGET="esp32s3"
 
-# Flash size — always 4MB regardless of actual chip capacity
-CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+# Flash size — 8MB minimum for OTA partition layout
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y

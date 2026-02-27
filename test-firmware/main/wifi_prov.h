@@ -6,3 +6,4 @@
 esp_err_t wifi_prov_init(void);
 void      wifi_prov_reset(void);
 bool      wifi_prov_is_connected(void);
+bool      wifi_prov_is_ap_mode(void);
