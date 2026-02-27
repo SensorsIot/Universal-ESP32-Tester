@@ -32,7 +32,8 @@ PROXY_EXE = "/usr/local/bin/plain_rfc2217_server.py"
 # Flap detection — suppress proxy restarts during USB connect/disconnect storms
 FLAP_WINDOW_S = 30       # Look at events within this window
 FLAP_THRESHOLD = 6        # 6 events in 30s = 3 connect/disconnect cycles
-FLAP_COOLDOWN_S = 30      # After flapping, wait 30s of quiet before retry
+FLAP_COOLDOWN_S = 10      # After flapping, wait before recovery attempt
+FLAP_MAX_RETRIES = 4      # Max no-GPIO recovery attempts before manual intervention
 
 # Native USB (ttyACM) boot delay — let ESP32-C3 boot past download-mode window
 # before opening the port (Linux cdc_acm asserts DTR+RTS on open, which triggers
@@ -44,7 +45,9 @@ STATE_ABSENT     = "absent"
 STATE_IDLE       = "idle"
 STATE_RESETTING  = "resetting"
 STATE_MONITORING = "monitoring"
-STATE_FLAPPING   = "flapping"
+STATE_FLAPPING      = "flapping"
+STATE_RECOVERING    = "recovering"
+STATE_DOWNLOAD_MODE = "download_mode"
 
 # Module-level state
 slots: dict[str, dict] = {}
@@ -130,6 +133,62 @@ def _gpio_set(pin, value):
         _gpio_directions[pin] = "output"
 
 
+# ---------------------------------------------------------------------------
+# USB Unbind / Rebind — stop kernel-level USB event storms
+# ---------------------------------------------------------------------------
+
+def _slot_key_to_usb_device(slot_key: str) -> str | None:
+    """Parse a slot_key like 'platform-3f980000.usb-usb-0:1.1.2:1.0' → '1-1.1.2'.
+
+    The USB device address is the bus-port portion before the interface suffix.
+    The slot_key format is: platform-<controller>-usb-<bus>:<port_path>:<interface>
+    We need the last 'usb-' to skip the controller name which also contains 'usb'.
+    """
+    # Find the last 'usb-' which precedes '<bus>:<port>:<iface>'
+    idx = slot_key.rfind("usb-")
+    if idx < 0:
+        return None
+    tail = slot_key[idx + 4:]  # '0:1.1.2:1.0'
+    parts = tail.split(":")
+    if len(parts) < 2:
+        return None
+    bus = parts[0]       # '0'
+    port_path = parts[1] # '1.1.2'
+    # Linux sysfs USB device name: <roothub>-<port_path>
+    # Pi: bus 0 → roothub '1'
+    try:
+        bus_num = int(bus) + 1
+    except ValueError:
+        return None
+    return f"{bus_num}-{port_path}"
+
+
+def _usb_unbind(usb_device: str) -> bool:
+    """Unbind a USB device from its driver to stop enumeration storms."""
+    path = "/sys/bus/usb/drivers/usb/unbind"
+    try:
+        with open(path, "w") as f:
+            f.write(usb_device)
+        print(f"[portal] USB unbind: {usb_device}", flush=True)
+        return True
+    except OSError as e:
+        print(f"[portal] USB unbind failed for {usb_device}: {e}", flush=True)
+        return False
+
+
+def _usb_rebind(usb_device: str) -> bool:
+    """Rebind a USB device so the kernel re-enumerates it."""
+    path = "/sys/bus/usb/drivers/usb/bind"
+    try:
+        with open(path, "w") as f:
+            f.write(usb_device)
+        print(f"[portal] USB rebind: {usb_device}", flush=True)
+        return True
+    except OSError as e:
+        print(f"[portal] USB rebind failed for {usb_device}: {e}", flush=True)
+        return False
+
+
 def log_activity(msg: str, cat: str = "info"):
     """Append a timestamped entry to the activity log."""
     entry = {
@@ -198,6 +257,8 @@ def load_config(path: str) -> dict[str, dict]:
                 "label": entry["label"],
                 "slot_key": key,
                 "tcp_port": entry["tcp_port"],
+                "gpio_boot": entry.get("gpio_boot"),
+                "gpio_en": entry.get("gpio_en"),
                 "present": False,
                 "running": False,
                 "pid": None,
@@ -210,6 +271,8 @@ def load_config(path: str) -> dict[str, dict]:
                 "flapping": False,
                 "state": STATE_ABSENT,
                 "_event_times": [],
+                "_recovering": False,
+                "_recover_retries": 0,
                 "_lock": threading.Lock(),
             }
         print(f"[portal] loaded {len(result)} slot(s) from {path}", flush=True)
@@ -404,6 +467,8 @@ def _make_dynamic_slot(slot_key: str) -> dict:
         "label": None,
         "slot_key": slot_key,
         "tcp_port": None,
+        "gpio_boot": None,
+        "gpio_en": None,
         "present": False,
         "running": False,
         "pid": None,
@@ -416,6 +481,8 @@ def _make_dynamic_slot(slot_key: str) -> dict:
         "flapping": False,
         "state": STATE_ABSENT,
         "_event_times": [],
+        "_recovering": False,
+        "_recover_retries": 0,
         "_lock": threading.Lock(),
     }
 
@@ -486,8 +553,12 @@ def _refresh_slot_health(slot: dict):
 
 
 def _slot_info(slot: dict) -> dict:
-    """Return a JSON-safe copy of a slot (excludes _lock)."""
-    return {k: v for k, v in slot.items() if not k.startswith("_")}
+    """Return a JSON-safe copy of a slot (excludes _lock, promotes _recovering/_recover_retries)."""
+    info = {k: v for k, v in slot.items() if not k.startswith("_")}
+    info["recovering"] = slot["_recovering"]
+    info["recover_retries"] = slot["_recover_retries"]
+    info["has_gpio"] = slot.get("gpio_boot") is not None
+    return info
 
 
 # ---------------------------------------------------------------------------
@@ -639,6 +710,177 @@ def serial_monitor(slot: dict, pattern: str | None = None,
         "line": matched_line,
         "output": lines,
     }
+
+
+# ---------------------------------------------------------------------------
+# USB Flap Recovery — unbind USB to stop storm, then recover via GPIO or backoff
+# ---------------------------------------------------------------------------
+
+def _start_flap_recovery(slot: dict):
+    """Entry point when flapping is detected.  Unbinds USB to stop the storm,
+    then dispatches to GPIO or no-GPIO recovery in a background thread."""
+    label = slot["label"] or slot["slot_key"][-20:]
+
+    if slot["_recovering"]:
+        return  # Already in a recovery cycle
+
+    slot["_recovering"] = True
+    slot["state"] = STATE_RECOVERING
+
+    # Stop proxy if still running
+    with slot["_lock"]:
+        if slot["running"] and slot["pid"]:
+            stop_proxy(slot)
+
+    # Unbind USB at kernel level — event storm stops immediately
+    usb_device = _slot_key_to_usb_device(slot["slot_key"])
+    if usb_device:
+        _usb_unbind(usb_device)
+        log_activity(f"{label}: USB unbound — flap storm stopped", "ok")
+    else:
+        log_activity(f"{label}: cannot determine USB device from slot_key", "error")
+        slot["_recovering"] = False
+        slot["state"] = STATE_FLAPPING
+        return
+
+    has_gpio = slot.get("gpio_boot") is not None
+    if has_gpio:
+        t = threading.Thread(
+            target=_recover_with_gpio, args=(slot, usb_device),
+            daemon=True, name=f"recover-gpio-{label}",
+        )
+    else:
+        t = threading.Thread(
+            target=_recover_without_gpio, args=(slot, usb_device),
+            daemon=True, name=f"recover-nogpio-{label}",
+        )
+    t.start()
+
+
+def _recover_with_gpio(slot: dict, usb_device: str):
+    """Recovery for boards WITH GPIO pins configured.
+
+    1. Wait cooldown
+    2. Hold BOOT/GPIO0 LOW (forces download mode on next boot)
+    3. Pulse EN/RST if configured
+    4. Rebind USB — device enumerates in download mode (stable)
+    5. State → download_mode; BOOT stays held LOW until /api/serial/release
+    """
+    label = slot["label"] or slot["slot_key"][-20:]
+    gpio_boot = slot["gpio_boot"]
+    gpio_en = slot.get("gpio_en")
+
+    log_activity(f"{label}: GPIO recovery — waiting {FLAP_COOLDOWN_S}s cooldown", "step")
+    time.sleep(FLAP_COOLDOWN_S)
+
+    # Hold BOOT/GPIO0 LOW → forces download mode
+    try:
+        _gpio_set(gpio_boot, 0)
+        log_activity(f"{label}: GPIO{gpio_boot} (BOOT) held LOW", "step")
+    except Exception as e:
+        log_activity(f"{label}: GPIO set failed: {e}", "error")
+        slot["_recovering"] = False
+        slot["state"] = STATE_FLAPPING
+        return
+
+    # Pulse EN/RST if we have it — clean reset into download mode
+    if gpio_en is not None:
+        try:
+            _gpio_set(gpio_en, 0)
+            time.sleep(0.1)
+            _gpio_set(gpio_en, 1)
+            log_activity(f"{label}: GPIO{gpio_en} (EN) pulsed — reset", "step")
+            time.sleep(0.5)
+        except Exception as e:
+            log_activity(f"{label}: EN pulse failed: {e}", "error")
+
+    # Rebind USB — device should enumerate in download mode now
+    _usb_rebind(usb_device)
+    time.sleep(2)  # Let kernel enumerate
+
+    slot["_recovering"] = False
+    slot["flapping"] = False
+    slot["_recover_retries"] = 0
+    slot["state"] = STATE_DOWNLOAD_MODE
+    slot["last_error"] = None
+    log_activity(
+        f"{label}: device in download mode — flash firmware, then POST /api/serial/release",
+        "ok",
+    )
+
+
+def _recover_without_gpio(slot: dict, usb_device: str):
+    """Recovery for boards WITHOUT GPIO pins.
+
+    Uses exponential backoff: unbind, wait, rebind, check if flapping resumes.
+    After FLAP_MAX_RETRIES, marks as needing manual intervention.
+    """
+    label = slot["label"] or slot["slot_key"][-20:]
+    retry = slot["_recover_retries"]
+    delay = FLAP_COOLDOWN_S * (2 ** retry)  # 10, 20, 40, 80s
+
+    if retry >= FLAP_MAX_RETRIES:
+        slot["_recovering"] = False
+        slot["state"] = STATE_FLAPPING
+        slot["last_error"] = (
+            f"Recovery failed after {FLAP_MAX_RETRIES} attempts — "
+            "needs manual intervention (re-flash with USB cable or add GPIO wiring)"
+        )
+        log_activity(f"{label}: {slot['last_error']}", "error")
+        return
+
+    log_activity(f"{label}: no-GPIO recovery attempt {retry + 1}/{FLAP_MAX_RETRIES} — waiting {delay}s", "step")
+    time.sleep(delay)
+
+    slot["_recover_retries"] = retry + 1
+    slot["_recovering"] = False  # Allow hotplug to detect if flapping resumes
+    slot["flapping"] = False
+    slot["_event_times"] = []
+    slot["last_error"] = None
+    slot["state"] = STATE_IDLE
+
+    # Rebind USB — if firmware is OK, device boots normally.
+    # If still corrupt, flapping resumes → _handle_hotplug detects → another cycle.
+    _usb_rebind(usb_device)
+    log_activity(f"{label}: USB rebound — monitoring for stability", "step")
+
+
+def _release_slot_gpio(slot: dict) -> dict:
+    """Release GPIO pins after flashing and reboot the device cleanly.
+
+    Sets BOOT to high-Z, pulses EN if available.
+    """
+    label = slot["label"] or slot["slot_key"][-20:]
+    gpio_boot = slot.get("gpio_boot")
+    gpio_en = slot.get("gpio_en")
+
+    if gpio_boot is None:
+        return {"ok": False, "error": f"{label}: no gpio_boot configured"}
+
+    if slot["state"] != STATE_DOWNLOAD_MODE:
+        return {"ok": False, "error": f"{label}: not in download_mode (state={slot['state']})"}
+
+    # Release BOOT pin → high-Z (input with pull-up)
+    try:
+        _gpio_set(gpio_boot, "z")
+        log_activity(f"{label}: GPIO{gpio_boot} (BOOT) released to high-Z", "step")
+    except Exception as e:
+        return {"ok": False, "error": f"GPIO release failed: {e}"}
+
+    # Pulse EN for clean reboot into normal firmware
+    if gpio_en is not None:
+        try:
+            _gpio_set(gpio_en, 0)
+            time.sleep(0.1)
+            _gpio_set(gpio_en, 1)
+            log_activity(f"{label}: GPIO{gpio_en} (EN) pulsed — rebooting into firmware", "step")
+        except Exception as e:
+            log_activity(f"{label}: EN pulse failed (non-fatal): {e}", "info")
+
+    slot["state"] = STATE_IDLE
+    slot["_recover_retries"] = 0
+    log_activity(f"{label}: released — device should boot into firmware", "ok")
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -794,6 +1036,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_serial_reset()
         elif path == "/api/serial/monitor":
             self._handle_serial_monitor()
+        elif path == "/api/serial/recover":
+            self._handle_serial_recover()
+        elif path == "/api/serial/release":
+            self._handle_serial_release()
         elif path == "/api/enter-portal":
             self._handle_enter_portal()
         elif path == "/api/start":
@@ -904,16 +1150,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
         label = slot["label"] or slot_key[-20:]
         configured = slot["tcp_port"] is not None
 
+        # -- Early exit: if recovery is in progress, ignore all events --
+        # The unbind/rebind cycle generates synthetic udev events; don't let
+        # them interfere with recovery state.
+        if slot["_recovering"]:
+            print(
+                f"[portal] hotplug: {action} {label} ignored (recovery in progress)",
+                flush=True,
+            )
+            self._send_json({
+                "ok": True, "slot_key": slot_key, "seq": seq_counter,
+                "accepted": False, "flapping": True, "recovering": True,
+            })
+            return
+
         # -- Flap detection --
         now = time.time()
         slot["_event_times"].append(now)
         # Prune events older than window
         slot["_event_times"] = [t for t in slot["_event_times"] if now - t < FLAP_WINDOW_S]
 
-        # Recovery: if already flapping, check if device has been quiet long enough
-        if slot["flapping"]:
+        # Recovery: if already flapping but not recovering, check if quiet long enough
+        if slot["flapping"] and not slot["_recovering"]:
             if len(slot["_event_times"]) < 2:
-                # All previous events aged out of window — quiet for >= FLAP_WINDOW_S
                 slot["flapping"] = False
                 slot["last_error"] = None
                 slot["state"] = STATE_IDLE if slot["present"] else STATE_ABSENT
@@ -926,17 +1185,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     slot["state"] = STATE_IDLE if slot["present"] else STATE_ABSENT
                     print(f'[portal] {label}: USB flapping cleared (quiet for {gap:.0f}s)', flush=True)
 
-        # Detect new flapping
+        # Detect new flapping → active recovery
         if not slot["flapping"] and len(slot["_event_times"]) >= FLAP_THRESHOLD:
             slot["flapping"] = True
             slot["state"] = STATE_FLAPPING
-            slot["last_error"] = "USB flapping detected — device is connect/disconnect cycling"
-            print(f'[portal] {label}: USB flapping detected ({len(slot["_event_times"])} events in {FLAP_WINDOW_S}s)', flush=True)
-            # Stop proxy proactively if running
-            if slot["running"] and slot["pid"]:
-                with lock:
-                    stop_proxy(slot)
-                slot["last_error"] = "USB flapping detected — device is connect/disconnect cycling"
+            slot["last_error"] = "USB flapping detected — starting recovery"
+            print(f'[portal] {label}: USB flapping detected ({len(slot["_event_times"])} events in {FLAP_WINDOW_S}s) — starting recovery', flush=True)
+            _start_flap_recovery(slot)
 
         if action == "add":
             slot["present"] = True
@@ -945,7 +1200,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 slot["state"] = STATE_IDLE
 
             if slot["flapping"]:
-                pass  # No proxy start; UI shows warning
+                pass  # Recovery handles everything
             elif configured:
                 # Start proxy in a background thread so we don't block the
                 # HTTP response for the settle + port-listen check.
@@ -955,13 +1210,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     if dn and "ttyACM" in dn:
                         time.sleep(NATIVE_USB_BOOT_DELAY_S)
                     with lk:
-                        if s["flapping"]:
-                            return  # Flapping detected while queued
+                        if s["flapping"] or s["_recovering"]:
+                            return  # Recovery in progress
                         # Stop existing proxy first if still running
                         if s["running"] and s["pid"]:
                             stop_proxy(s)
                         start_proxy(s)
-                        # If flapping was detected during start_proxy, restore its error
                         if s["flapping"]:
                             s["last_error"] = "USB flapping detected \u2014 device is connect/disconnect cycling"
                 threading.Thread(target=_bg_start, daemon=True).start()
@@ -974,7 +1228,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif action == "remove":
             slot["present"] = False
-            slot["state"] = STATE_ABSENT
+            if not slot["flapping"]:
+                slot["state"] = STATE_ABSENT
             if configured and slot["running"]:
                 def _bg_stop(s=slot, lk=lock):
                     with lk:
@@ -997,6 +1252,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "seq": seq_counter,
             "accepted": configured,
             "flapping": slot["flapping"],
+            "recovering": slot["_recovering"],
         })
 
     def _handle_start(self):
@@ -1229,6 +1485,45 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 log_activity(f"serial.monitor({slot_label}) — timeout, no match", "info")
         else:
             log_activity(f"serial.monitor({slot_label}) — {result.get('error', 'failed')}", "error")
+        self._send_json(result)
+
+    # -- recovery handlers --
+
+    def _handle_serial_recover(self):
+        """POST /api/serial/recover {"slot": "SLOT1"} — manual recovery trigger."""
+        body = self._read_json() or {}
+        slot_label = body.get("slot")
+        if not slot_label:
+            self._send_json({"ok": False, "error": "missing 'slot' field"}, 400)
+            return
+        slot = _find_slot_by_label(slot_label)
+        if not slot:
+            self._send_json({"ok": False, "error": f"slot '{slot_label}' not found"})
+            return
+        # Reset retry counter for fresh attempt
+        slot["_recover_retries"] = 0
+        slot["flapping"] = True
+        log_activity(f"serial.recover({slot_label}) — manual recovery triggered", "step")
+        _start_flap_recovery(slot)
+        self._send_json({"ok": True, "message": f"recovery started for {slot_label}"})
+
+    def _handle_serial_release(self):
+        """POST /api/serial/release {"slot": "SLOT1"} — release GPIO after flashing."""
+        body = self._read_json() or {}
+        slot_label = body.get("slot")
+        if not slot_label:
+            self._send_json({"ok": False, "error": "missing 'slot' field"}, 400)
+            return
+        slot = _find_slot_by_label(slot_label)
+        if not slot:
+            self._send_json({"ok": False, "error": f"slot '{slot_label}' not found"})
+            return
+        log_activity(f"serial.release({slot_label})", "step")
+        result = _release_slot_gpio(slot)
+        if result["ok"]:
+            log_activity(f"serial.release({slot_label}) — done", "ok")
+        else:
+            log_activity(f"serial.release({slot_label}) — {result.get('error', 'failed')}", "error")
         self._send_json(result)
 
     # -- activity log & enter-portal --
@@ -1713,6 +2008,15 @@ _UI_HTML = """\
         .slot.resetting { border-color: #e67e22; box-shadow: 0 0 20px rgba(230,126,34,0.2); }
         .slot.monitoring { border-color: #9b59b6; box-shadow: 0 0 20px rgba(155,89,182,0.2); }
         .slot.flapping { border-color: #e74c3c; background: #1a0000; }
+        .slot.recovering {
+            border-color: #e67e22; background: #1a1000;
+            animation: pulse-recovering 2s ease-in-out infinite;
+        }
+        @keyframes pulse-recovering {
+            0%, 100% { border-color: #e67e22; box-shadow: 0 0 15px rgba(230,126,34,0.3); }
+            50% { border-color: #f39c12; box-shadow: 0 0 30px rgba(243,156,18,0.5); }
+        }
+        .slot.download_mode { border-color: #2ecc71; box-shadow: 0 0 20px rgba(46,204,113,0.3); }
         .slot.absent { border-color: #333; }
         .slot.present { border-color: #555; }
         .slot-header {
@@ -1729,6 +2033,8 @@ _UI_HTML = """\
         .status.resetting { background: #e67e22; color: #fff; }
         .status.monitoring { background: #9b59b6; color: #fff; }
         .status.flapping { background: #e74c3c; color: #fff; }
+        .status.recovering { background: #e67e22; color: #fff; }
+        .status.download_mode { background: #2ecc71; color: #1a1a2e; }
         .status.absent { background: #333; color: #666; }
         .status.present { background: #555; color: #ccc; }
         .status.stopped { background: #333; color: #666; }
@@ -1748,6 +2054,23 @@ _UI_HTML = """\
             color: #e74c3c; font-weight: bold; padding: 6px 10px;
             background: rgba(231,76,60,0.15); border-radius: 4px; margin-top: 8px;
         }
+        .recover-info {
+            color: #e67e22; font-weight: bold; padding: 6px 10px;
+            background: rgba(230,126,34,0.15); border-radius: 4px; margin-top: 8px;
+        }
+        .download-info {
+            color: #2ecc71; font-weight: bold; padding: 6px 10px;
+            background: rgba(46,204,113,0.15); border-radius: 4px; margin-top: 8px;
+        }
+        .slot-actions { margin-top: 10px; display: flex; gap: 8px; }
+        .slot-actions button {
+            padding: 6px 14px; border-radius: 6px; cursor: pointer;
+            font-size: 0.85em; border: none; font-weight: bold; transition: all 0.2s;
+        }
+        .btn-release { background: #2ecc71; color: #1a1a2e; }
+        .btn-release:hover { background: #27ae60; }
+        .btn-recover { background: #e67e22; color: #fff; }
+        .btn-recover:hover { background: #d35400; }
         .info { text-align: center; color: #666; margin-top: 30px; font-size: 0.85em; }
         /* Activity log */
         .log-section {
@@ -1858,7 +2181,7 @@ _UI_HTML = """\
             <button onclick="clearLog()">Clear</button>
         </div>
     </div>
-    <div class="info" id="info">Auto-refresh every 2 seconds</div>
+    <div class="info" id="info">Auto-refresh every 5 seconds</div>
     </div><!-- /main-content -->
     <div class="human-overlay" id="human-overlay">
         <div class="human-modal">
@@ -1886,7 +2209,7 @@ async function fetchDevices() {
         }
         renderSlots(data.slots);
         document.getElementById('info').textContent =
-            'Hostname: ' + hostName + '  |  IP: ' + hostIp + '  |  Auto-refresh every 2s';
+            'Hostname: ' + hostName + '  |  IP: ' + hostIp + '  |  Auto-refresh every 5s';
     } catch (e) {
         console.error('Error fetching devices:', e);
     }
@@ -1903,7 +2226,11 @@ function slotStatus(s) {
 }
 function statusLabel(s) {
     const st = slotStatus(s);
-    return st.toUpperCase();
+    const labels = {
+        'recovering': 'RECOVERING',
+        'download_mode': 'DOWNLOAD MODE',
+    };
+    return labels[st] || st.toUpperCase();
 }
 
 function renderSlots(slots) {
@@ -1913,6 +2240,25 @@ function renderSlots(slots) {
         const label = s.label || s.slot_key.slice(-20);
         const ipUrl = s.url || '';
         const copyTarget = ipUrl;
+        let statusMsg = '';
+        let actionBtns = '';
+        if (st === 'recovering') {
+            statusMsg = '<div class="recover-info">&#9881; Recovery in progress' +
+                (s.recover_retries > 0 ? ' (attempt ' + s.recover_retries + ')' : '') +
+                '...</div>';
+        } else if (st === 'download_mode') {
+            statusMsg = '<div class="download-info">&#10003; Device in download mode — ready to flash</div>';
+            actionBtns = '<div class="slot-actions">' +
+                '<button class="btn-release" onclick="releaseSlot(\'' + label + '\')">Release &amp; Reboot</button>' +
+                '</div>';
+        } else if (s.flapping && !s.recovering) {
+            statusMsg = '<div class="flap-warning">&#9888; Device is boot-looping.' +
+                (s.recover_retries >= 4 ? ' Needs manual intervention.' : '') +
+                '</div>';
+            actionBtns = '<div class="slot-actions">' +
+                '<button class="btn-recover" onclick="recoverSlot(\'' + label + '\')">Retry Recovery</button>' +
+                '</div>';
+        }
         return `
         <div class="slot ${st}">
             <div class="slot-header">
@@ -1923,13 +2269,15 @@ function renderSlots(slots) {
                 <div>Port: <span>${s.tcp_port || '-'}</span></div>
                 <div>Device: <span>${s.devnode || 'None'}</span></div>
                 ${s.pid ? '<div>PID: <span>' + s.pid + '</span></div>' : ''}
+                ${s.has_gpio ? '<div>GPIO: <span>BOOT=' + (s.gpio_boot ?? '?') + (s.gpio_en != null ? ', EN=' + s.gpio_en : '') + '</span></div>' : ''}
             </div>
-            <div class="url-box ${s.running || st === 'idle' ? '' : 'empty'}"
+            <div class="url-box ${s.running || st === 'idle' || st === 'download_mode' ? '' : 'empty'}"
                  onclick="${s.running || st === 'idle' ? "copyUrl('" + copyTarget + "',this)" : ''}">
-                ${s.running || st === 'idle' ? ipUrl || 'Proxy running' : (s.present || st === 'resetting' || st === 'monitoring' ? 'Device present, proxy not running' : 'No device connected')}
+                ${s.running || st === 'idle' ? ipUrl || 'Proxy running' : (st === 'download_mode' ? 'In download mode — flash via RFC2217' : (s.present || st === 'resetting' || st === 'monitoring' ? 'Device present, proxy not running' : (st === 'recovering' ? 'USB unbound — recovering...' : 'No device connected')))}
             </div>
             ${s.last_error ? '<div class="error">Error: ' + s.last_error + '</div>' : ''}
-            ${s.flapping ? '<div class="flap-warning">&#9888; Device is boot-looping (rapid USB connect/disconnect). Proxy start suppressed until device stabilises.</div>' : ''}
+            ${statusMsg}
+            ${actionBtns}
         </div>`;
     }).join('');
 }
@@ -1995,6 +2343,33 @@ async function enterPortal() {
 function clearLog() {
     document.getElementById('log-entries').innerHTML = '';
     lastLogTs = '';
+}
+
+async function releaseSlot(label) {
+    if (!confirm('Release GPIO and reboot ' + label + ' into firmware?')) return;
+    try {
+        const resp = await fetch('/api/serial/release', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({slot: label})
+        });
+        const data = await resp.json();
+        if (!data.ok) alert('Release failed: ' + (data.error || 'unknown'));
+    } catch (e) { alert('Error: ' + e); }
+    refresh();
+}
+
+async function recoverSlot(label) {
+    try {
+        const resp = await fetch('/api/serial/recover', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({slot: label})
+        });
+        const data = await resp.json();
+        if (!data.ok) alert('Recovery failed: ' + (data.error || 'unknown'));
+    } catch (e) { alert('Error: ' + e); }
+    refresh();
 }
 
 let humanPending = false;
@@ -2107,7 +2482,7 @@ async function refresh() {
     await Promise.all([fetchDevices(), fetchLog(), fetchHuman(), fetchTestProgress()]);
 }
 refresh();
-setInterval(refresh, 2000);
+setInterval(refresh, 5000);
 </script>
 </body>
 </html>
