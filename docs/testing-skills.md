@@ -58,6 +58,7 @@ Each workbench skill maps to specific test steps using the firmware:
 | `esp32-workbench-ble` | Scan for `WB-Test`, connect, discover services | BLE scan finds device; NUS service UUID appears in characteristics |
 | `esp32-workbench-ota` | Upload binary, trigger OTA via HTTP `/ota` | Serial shows `"OTA succeeded"`, device reboots with new firmware |
 | `esp32-workbench-gpio` | Toggle EN pin to reset device | Serial monitor shows fresh boot output |
+| `esp32-workbench-serial-flashing` | Trigger flapping, verify detection and recovery | Flapping detected, auto-recovery succeeds, device returns to idle |
 | `esp32-workbench-mqtt` | Start broker, verify device can reach `192.168.4.1:1883` | (Firmware doesn't use MQTT; test broker start/stop independently) |
 | `esp32-workbench-test` | Run full validation walkthrough below | All steps pass |
 
@@ -147,6 +148,176 @@ previous one.
 
 1. Toggle EN pin LOW then HIGH via GPIO skill
 2. Confirm serial shows fresh boot output
+
+### 9. Flapping detection and recovery (requires GPIO slot)
+
+This test verifies that the portal detects USB flapping (rapid connect/disconnect
+cycling) and automatically recovers the device. **Use a slot with GPIO pins
+configured** (e.g. SLOT1 with `gpio_boot` and `gpio_en`).
+
+**Prerequisites:** Device has valid firmware and is in a stable state (idle, not
+flapping). Note the slot's current state via `GET /api/devices`.
+
+#### 9a. Trigger flapping
+
+Erase the device's flash to cause a boot loop (corrupt flash → USB reconnect
+cycle):
+
+```bash
+# Put device in download mode via GPIO
+curl -s -X POST http://192.168.0.87:8080/api/serial/recover \
+     -H "Content-Type: application/json" \
+     -d '{"slot": "SLOT1"}'
+
+# Wait for download mode, then erase flash
+esptool.py --port rfc2217://192.168.0.87:4001?ign_set_control \
+           --chip esp32s3 erase_flash
+
+# Release GPIO — device reboots into erased flash → boot loop
+curl -s -X POST http://192.168.0.87:8080/api/serial/release \
+     -H "Content-Type: application/json" \
+     -d '{"slot": "SLOT1"}'
+```
+
+#### 9b. Verify flap detection
+
+Within ~30 seconds, the portal should detect the flapping:
+
+```bash
+curl -s http://192.168.0.87:8080/api/devices | python3 -m json.tool
+```
+
+Confirm for the target slot:
+- `"flapping": true`
+- `"recovering": true`
+- `"state": "flapping"` or `"recovering"`
+- Activity log shows: `"flapping detected (N events in 30s)"`
+
+#### 9c. Verify GPIO recovery
+
+For a GPIO-equipped slot, the portal automatically:
+1. Unbinds the USB device at the kernel level (stops the event storm)
+2. Waits `FLAP_COOLDOWN_S` (10s) for hardware to settle
+3. Holds BOOT/GPIO0 LOW (forces download mode on next boot)
+4. Pulses EN to reset the device
+5. Rebinds USB — device enumerates in download mode (stable)
+
+After recovery completes (~15s), check:
+
+```bash
+curl -s http://192.168.0.87:8080/api/devices | python3 -m json.tool
+```
+
+Confirm:
+- `"state": "download_mode"` — device is in download mode, waiting for flash
+- `"flapping": false`
+- `"recovering": false`
+
+#### 9d. Re-flash and release
+
+Flash firmware back onto the device, then release GPIO:
+
+```bash
+# Flash firmware
+esptool.py --port rfc2217://192.168.0.87:4001?ign_set_control \
+           --chip esp32s3 --baud 460800 \
+           write_flash --flash_size 8MB @flash_args
+
+# Release BOOT pin and reboot into firmware
+curl -s -X POST http://192.168.0.87:8080/api/serial/release \
+     -H "Content-Type: application/json" \
+     -d '{"slot": "SLOT1"}'
+```
+
+Confirm via serial or `/api/devices`:
+- Device boots normally (`"state": "idle"`)
+- Serial shows `"=== Workbench Test Firmware"` banner
+
+### 10. Flapping recovery — no-GPIO slot
+
+This tests the no-GPIO recovery path on a slot **without** `gpio_boot`/`gpio_en`
+(e.g. SLOT2 or SLOT3). The portal cannot force download mode, so it uses a
+flat cooldown + USB rebind strategy with up to `FLAP_MAX_RETRIES` (2) attempts.
+
+**Warning:** If the device has erased/corrupt flash, no-GPIO recovery will
+exhaust retries and leave the slot in `flapping` state requiring manual
+intervention (flash via direct USB cable on the Pi). Only run this test if you
+can physically access the Pi or the device has a recoverable boot issue (e.g.
+WiFi misconfiguration, not erased flash).
+
+#### 10a. Trigger and detect
+
+Same as 9a/9b, but on a no-GPIO slot. Since there's no GPIO to enter download
+mode, you'll need to erase flash by connecting directly on the Pi:
+
+```bash
+# On the Pi — erase flash directly
+ssh pi@192.168.0.87 "esptool.py --port /dev/ttyACM1 \
+    --before=usb_reset --chip esp32s3 erase_flash"
+```
+
+After erase, the device boot-loops and the portal detects flapping.
+
+#### 10b. Verify no-GPIO recovery attempts
+
+The portal will:
+1. Unbind USB, wait `FLAP_COOLDOWN_S` (10s)
+2. Rebind USB and hope the device stabilises
+3. If flapping resumes, repeat up to `FLAP_MAX_RETRIES` (2) times
+4. After retries exhausted: slot stays `flapping`, activity log shows
+   `"needs manual intervention"`
+
+Check:
+```bash
+curl -s http://192.168.0.87:8080/api/devices | python3 -m json.tool
+```
+
+Confirm:
+- `"flapping": true`, `"recovering": false`
+- `"recover_retries": 2` (max reached)
+
+#### 10c. Manual recovery
+
+Flash firmware directly on the Pi to stop the boot loop:
+
+```bash
+ssh pi@192.168.0.87 "esptool.py --port /dev/ttyACM1 \
+    --before=usb_reset --chip esp32s3 --baud 460800 \
+    write_flash --flash_size 8MB 0x0 /path/to/merged-binary.bin"
+```
+
+After flashing, the device stabilises and the stale-flapping auto-clear kicks
+in: on the next `/api/devices` poll, aged-out events are pruned from
+`_event_times` and the `flapping` flag clears automatically.
+
+Confirm:
+- `"flapping": false`, `"state": "idle"`
+
+### 11. Manual recovery trigger
+
+The `POST /api/serial/recover` endpoint can trigger recovery manually, even
+when the slot is not currently flapping. This resets the retry counter and
+starts a fresh recovery cycle.
+
+```bash
+curl -s -X POST http://192.168.0.87:8080/api/serial/recover \
+     -H "Content-Type: application/json" \
+     -d '{"slot": "SLOT1"}'
+```
+
+Confirm response: `{"ok": true, ...}`
+
+### 12. Stale flapping auto-clear
+
+After a device stabilises (stops cycling), the `flapping` flag should clear
+automatically without any manual action.
+
+1. Trigger flapping on a GPIO slot (step 9a–9c)
+2. After GPIO recovery puts device in download mode, flash firmware (step 9d)
+3. Wait at least `FLAP_WINDOW_S` (30s) without touching the device
+4. Poll `GET /api/devices`
+5. Confirm `"flapping": false` — the portal pruned aged-out events from the
+   event window and cleared the flag
 
 ## Adding Test Coverage
 
