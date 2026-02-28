@@ -52,35 +52,138 @@ Each workbench skill maps to specific test steps using the firmware:
 
 | Skill | Test steps | What confirms it works |
 |-------|-----------|----------------------|
-| `esp32-workbench-serial-flashing` | Flash the firmware via RFC2217 | Serial monitor shows `"=== Workbench Test Firmware"` after reboot |
+| `esp32-workbench-serial-flashing` | Erase flash, trigger flapping, recover, re-flash | Flapping detected, recovery runs, firmware boots after re-flash |
 | `esp32-workbench-logging` | Start serial monitor; check UDP logs | Serial shows boot output; `GET /api/udplog` returns heartbeat lines |
 | `esp32-workbench-wifi` | Run `enter-portal` with device in AP mode | Serial shows `"STA got IP"`, device joins workbench network |
 | `esp32-workbench-ble` | Scan for `WB-Test`, connect, discover services | BLE scan finds device; NUS service UUID appears in characteristics |
 | `esp32-workbench-ota` | Upload binary, trigger OTA via HTTP `/ota` | Serial shows `"OTA succeeded"`, device reboots with new firmware |
-| `esp32-workbench-gpio` | Toggle EN pin to reset device | Serial monitor shows fresh boot output |
-| `esp32-workbench-serial-flashing` | Trigger flapping, verify detection and recovery | Flapping detected, auto-recovery succeeds, device returns to idle |
+| `esp32-workbench-gpio` | Toggle EN pin to reset device (GPIO slots only) | Serial monitor shows fresh boot output |
 | `esp32-workbench-mqtt` | Start broker, verify device can reach `192.168.4.1:1883` | (Firmware doesn't use MQTT; test broker start/stop independently) |
 | `esp32-workbench-test` | Run full validation walkthrough below | All steps pass |
 
 ## Validation Walkthrough
 
-Run through these steps in order after flashing. Each step builds on the
-previous one.
+Run through these steps in order on each slot under test. Each step builds on
+the previous one. Steps marked **(GPIO only)** require a slot with `gpio_boot`
+and `gpio_en` configured (e.g. SLOT1).
 
-### 1. Serial flashing and boot
+Replace `<SLOT>`, `<PORT>`, and `<DEVNODE>` with the slot's values from
+`GET /api/devices` (e.g. `SLOT1`/`4001`/`/dev/ttyACM3`).
 
-1. Flash `wb-test-firmware.bin` via the serial flashing skill
-2. Start serial monitor
-3. Confirm output contains:
-   - `"=== Workbench Test Firmware v0.1.0 ==="`
-   - `"NVS initialized"`
-   - `"UDP logging -> 192.168.0.87:5555"`
-   - `"No WiFi credentials, starting AP provisioning"`
-   - `"AP mode: SSID='WB-Test-Setup'"`
-   - `"BLE NUS initialized"`
-   - `"Init complete, running event-driven"`
+### 1. Flapping detection and recovery
 
-### 2. WiFi provisioning
+Erase flash to trigger a boot loop, verify the portal detects flapping and
+attempts recovery. The recovery path depends on whether the slot has GPIO.
+
+#### 1a. Erase flash
+
+**GPIO slot** — use the recover API to enter download mode, erase, then release:
+
+```bash
+curl -s -X POST http://192.168.0.87:8080/api/serial/recover \
+     -H "Content-Type: application/json" -d '{"slot": "<SLOT>"}'
+# Wait for download mode (~15s)
+esptool.py --port rfc2217://192.168.0.87:<PORT>?ign_set_control \
+           --chip esp32s3 erase_flash
+curl -s -X POST http://192.168.0.87:8080/api/serial/release \
+     -H "Content-Type: application/json" -d '{"slot": "<SLOT>"}'
+```
+
+**No-GPIO slot** — erase directly on the Pi (portal must release the serial
+port first, or use `--before=usb_reset`):
+
+```bash
+ssh pi@192.168.0.87 "python3 -m esptool --port <DEVNODE> \
+    --before=usb_reset --chip esp32s3 erase_flash"
+```
+
+The device reboots into erased flash and starts boot-looping.
+
+#### 1b. Verify flap detection
+
+Within ~30 seconds the portal detects the flapping:
+
+```bash
+curl -s http://192.168.0.87:8080/api/devices | python3 -m json.tool
+```
+
+Confirm for the target slot:
+- `"flapping": true`
+- `"recovering": true`
+- Activity log shows: `"flapping detected (N events in 30s)"`
+
+#### 1c. Verify recovery
+
+**GPIO slot:** The portal automatically unbinds USB, waits `FLAP_COOLDOWN_S`
+(10s), holds BOOT LOW, pulses EN, rebinds USB. After ~15s:
+- `"state": "download_mode"` — device stable in download mode
+- `"flapping": false`, `"recovering": false`
+
+**No-GPIO slot:** The portal unbinds USB, waits `FLAP_COOLDOWN_S` (10s),
+rebinds. With erased flash, flapping resumes. After `FLAP_MAX_RETRIES` (2)
+exhausted:
+- `"flapping": true`, `"recovering": false`
+- `"recover_retries": 2`
+- Activity log shows: `"needs manual intervention"`
+
+### 2. Serial flashing and boot
+
+Flash test firmware. This also serves as the recovery step after flapping.
+
+**GPIO slot** (device is in download mode from step 1c):
+
+```bash
+esptool.py --port rfc2217://192.168.0.87:<PORT>?ign_set_control \
+           --chip esp32s3 --baud 460800 \
+           write_flash @flash_args
+curl -s -X POST http://192.168.0.87:8080/api/serial/release \
+     -H "Content-Type: application/json" -d '{"slot": "<SLOT>"}'
+```
+
+**No-GPIO slot** (flash directly on the Pi):
+
+```bash
+# Upload build artifacts to Pi first
+scp build/bootloader/bootloader.bin build/wb-test-firmware.bin \
+    build/partition_table/partition-table.bin build/ota_data_initial.bin \
+    pi@192.168.0.87:/tmp/
+
+ssh pi@192.168.0.87 "python3 -m esptool --port <DEVNODE> \
+    --before=usb_reset --chip esp32s3 --baud 460800 \
+    write_flash --flash_mode dio --flash_freq 80m --flash_size <FLASH_SIZE> \
+    0x0 /tmp/bootloader.bin \
+    0x8000 /tmp/partition-table.bin \
+    0xf000 /tmp/ota_data_initial.bin \
+    0x20000 /tmp/wb-test-firmware.bin"
+```
+
+Use `--flash_size` matching the board (check with `flash_id` or `GET /api/devices`).
+
+After flashing, verify boot via serial reset:
+
+```bash
+curl -s -X POST http://192.168.0.87:8080/api/serial/reset \
+     -H "Content-Type: application/json" \
+     -d '{"slot": "<SLOT>", "lines": 80}'
+```
+
+Confirm output contains:
+- `"=== Workbench Test Firmware v0.1.0 ==="`
+- `"NVS initialized"`
+- `"UDP logging -> 192.168.0.87:5555"`
+- `"No WiFi credentials, starting AP provisioning"`
+- `"AP mode: SSID='WB-Test-Setup'"`
+- `"BLE NUS initialized"`
+- `"Init complete, running event-driven"`
+
+#### Stale flapping auto-clear
+
+For no-GPIO slots that were left in `flapping` state after step 1c, the flag
+clears automatically once the device stabilises: on the next `GET /api/devices`
+poll, aged-out events are pruned from `_event_times` within `FLAP_WINDOW_S`
+(30s). Confirm `"flapping": false`, `"state": "idle"` after waiting 30s.
+
+### 3. WiFi provisioning
 
 1. Confirm device is in AP mode (serial shows `"AP mode"`)
 2. Run `enter-portal` with:
@@ -92,7 +195,7 @@ previous one.
    - `"STA mode, connecting to '<ssid>'"`
    - `"STA got IP"`
 
-### 3. UDP logging
+### 4. UDP logging
 
 1. After WiFi is connected, check UDP logs:
    ```bash
@@ -100,7 +203,7 @@ previous one.
    ```
 2. Confirm heartbeat lines appear: `"heartbeat N | wifi=1 ble=0"`
 
-### 4. HTTP endpoints
+### 5. HTTP endpoints
 
 1. Get device IP from serial output or workbench scan
 2. Via HTTP relay:
@@ -111,7 +214,7 @@ previous one.
    ```
 3. Confirm JSON response contains `project`, `version`, `wifi_connected: true`
 
-### 5. BLE
+### 6. BLE
 
 1. Scan for BLE devices:
    ```bash
@@ -122,7 +225,7 @@ previous one.
 2. Confirm `WB-Test` appears in scan results
 3. Connect and discover services — NUS UUID `6e400001-b5a3-f393-e0a9-e50e24dcca9e` should be present
 
-### 6. OTA update
+### 7. OTA update
 
 1. Ensure firmware binary is uploaded to workbench (see Flashing section)
 2. Trigger OTA via HTTP:
@@ -134,7 +237,7 @@ previous one.
 3. Monitor serial for `"OTA succeeded, rebooting..."`
 4. Confirm device reboots and shows boot banner again
 
-### 7. WiFi reset
+### 8. WiFi reset
 
 1. Via HTTP:
    ```bash
@@ -144,180 +247,23 @@ previous one.
    ```
 2. Confirm serial shows `"WiFi credentials erased"` then reboot into AP mode
 
-### 8. GPIO reset
+### 9. GPIO reset (GPIO only)
 
 1. Toggle EN pin LOW then HIGH via GPIO skill
 2. Confirm serial shows fresh boot output
 
-### 9. Flapping detection and recovery (requires GPIO slot)
+### 10. Manual recovery trigger
 
-This test verifies that the portal detects USB flapping (rapid connect/disconnect
-cycling) and automatically recovers the device. **Use a slot with GPIO pins
-configured** (e.g. SLOT1 with `gpio_boot` and `gpio_en`).
-
-**Prerequisites:** Device has valid firmware and is in a stable state (idle, not
-flapping). Note the slot's current state via `GET /api/devices`.
-
-#### 9a. Trigger flapping
-
-Erase the device's flash to cause a boot loop (corrupt flash → USB reconnect
-cycle):
-
-```bash
-# Put device in download mode via GPIO
-curl -s -X POST http://192.168.0.87:8080/api/serial/recover \
-     -H "Content-Type: application/json" \
-     -d '{"slot": "SLOT1"}'
-
-# Wait for download mode, then erase flash
-esptool.py --port rfc2217://192.168.0.87:4001?ign_set_control \
-           --chip esp32s3 erase_flash
-
-# Release GPIO — device reboots into erased flash → boot loop
-curl -s -X POST http://192.168.0.87:8080/api/serial/release \
-     -H "Content-Type: application/json" \
-     -d '{"slot": "SLOT1"}'
-```
-
-#### 9b. Verify flap detection
-
-Within ~30 seconds, the portal should detect the flapping:
-
-```bash
-curl -s http://192.168.0.87:8080/api/devices | python3 -m json.tool
-```
-
-Confirm for the target slot:
-- `"flapping": true`
-- `"recovering": true`
-- `"state": "flapping"` or `"recovering"`
-- Activity log shows: `"flapping detected (N events in 30s)"`
-
-#### 9c. Verify GPIO recovery
-
-For a GPIO-equipped slot, the portal automatically:
-1. Unbinds the USB device at the kernel level (stops the event storm)
-2. Waits `FLAP_COOLDOWN_S` (10s) for hardware to settle
-3. Holds BOOT/GPIO0 LOW (forces download mode on next boot)
-4. Pulses EN to reset the device
-5. Rebinds USB — device enumerates in download mode (stable)
-
-After recovery completes (~15s), check:
-
-```bash
-curl -s http://192.168.0.87:8080/api/devices | python3 -m json.tool
-```
-
-Confirm:
-- `"state": "download_mode"` — device is in download mode, waiting for flash
-- `"flapping": false`
-- `"recovering": false`
-
-#### 9d. Re-flash and release
-
-Flash firmware back onto the device, then release GPIO:
-
-```bash
-# Flash firmware
-esptool.py --port rfc2217://192.168.0.87:4001?ign_set_control \
-           --chip esp32s3 --baud 460800 \
-           write_flash --flash_size 8MB @flash_args
-
-# Release BOOT pin and reboot into firmware
-curl -s -X POST http://192.168.0.87:8080/api/serial/release \
-     -H "Content-Type: application/json" \
-     -d '{"slot": "SLOT1"}'
-```
-
-Confirm via serial or `/api/devices`:
-- Device boots normally (`"state": "idle"`)
-- Serial shows `"=== Workbench Test Firmware"` banner
-
-### 10. Flapping recovery — no-GPIO slot
-
-This tests the no-GPIO recovery path on a slot **without** `gpio_boot`/`gpio_en`
-(e.g. SLOT2 or SLOT3). The portal cannot force download mode, so it uses a
-flat cooldown + USB rebind strategy with up to `FLAP_MAX_RETRIES` (2) attempts.
-
-**Warning:** If the device has erased/corrupt flash, no-GPIO recovery will
-exhaust retries and leave the slot in `flapping` state requiring manual
-intervention (flash via direct USB cable on the Pi). Only run this test if you
-can physically access the Pi or the device has a recoverable boot issue (e.g.
-WiFi misconfiguration, not erased flash).
-
-#### 10a. Trigger and detect
-
-Same as 9a/9b, but on a no-GPIO slot. Since there's no GPIO to enter download
-mode, you'll need to erase flash by connecting directly on the Pi:
-
-```bash
-# On the Pi — erase flash directly
-ssh pi@192.168.0.87 "esptool.py --port /dev/ttyACM1 \
-    --before=usb_reset --chip esp32s3 erase_flash"
-```
-
-After erase, the device boot-loops and the portal detects flapping.
-
-#### 10b. Verify no-GPIO recovery attempts
-
-The portal will:
-1. Unbind USB, wait `FLAP_COOLDOWN_S` (10s)
-2. Rebind USB and hope the device stabilises
-3. If flapping resumes, repeat up to `FLAP_MAX_RETRIES` (2) times
-4. After retries exhausted: slot stays `flapping`, activity log shows
-   `"needs manual intervention"`
-
-Check:
-```bash
-curl -s http://192.168.0.87:8080/api/devices | python3 -m json.tool
-```
-
-Confirm:
-- `"flapping": true`, `"recovering": false`
-- `"recover_retries": 2` (max reached)
-
-#### 10c. Manual recovery
-
-Flash firmware directly on the Pi to stop the boot loop:
-
-```bash
-ssh pi@192.168.0.87 "esptool.py --port /dev/ttyACM1 \
-    --before=usb_reset --chip esp32s3 --baud 460800 \
-    write_flash --flash_size 8MB 0x0 /path/to/merged-binary.bin"
-```
-
-After flashing, the device stabilises and the stale-flapping auto-clear kicks
-in: on the next `/api/devices` poll, aged-out events are pruned from
-`_event_times` and the `flapping` flag clears automatically.
-
-Confirm:
-- `"flapping": false`, `"state": "idle"`
-
-### 11. Manual recovery trigger
-
-The `POST /api/serial/recover` endpoint can trigger recovery manually, even
-when the slot is not currently flapping. This resets the retry counter and
-starts a fresh recovery cycle.
+The `POST /api/serial/recover` endpoint triggers recovery manually, even when
+the slot is not currently flapping. Resets the retry counter and starts a fresh
+recovery cycle.
 
 ```bash
 curl -s -X POST http://192.168.0.87:8080/api/serial/recover \
-     -H "Content-Type: application/json" \
-     -d '{"slot": "SLOT1"}'
+     -H "Content-Type: application/json" -d '{"slot": "<SLOT>"}'
 ```
 
 Confirm response: `{"ok": true, ...}`
-
-### 12. Stale flapping auto-clear
-
-After a device stabilises (stops cycling), the `flapping` flag should clear
-automatically without any manual action.
-
-1. Trigger flapping on a GPIO slot (step 9a–9c)
-2. After GPIO recovery puts device in download mode, flash firmware (step 9d)
-3. Wait at least `FLAP_WINDOW_S` (30s) without touching the device
-4. Poll `GET /api/devices`
-5. Confirm `"flapping": false` — the portal pruned aged-out events from the
-   event window and cleared the flag
 
 ## Adding Test Coverage
 
