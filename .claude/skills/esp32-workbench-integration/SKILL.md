@@ -328,7 +328,7 @@ Update the project's build configuration:
 
 **partitions.csv** — copy from workbench-test if project needs OTA but doesn't have dual OTA layout
 
-**sdkconfig.defaults** — verify required options are set (NimBLE, partition table, flash size, etc.)
+**sdkconfig.defaults** — verify required options are set (NimBLE, partition table, flash size, etc.). Flash size defaults to 4MB: use `CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y` unless the actual flash size is known (e.g. via `esptool.py flash_id` or from the datasheet), in which case use the actual size. Partition tables must fit within the flash size.
 
 **dns_server component** — copy `workbench-test/components/dns_server/` if project needs captive portal but doesn't have it
 

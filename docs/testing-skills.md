@@ -17,6 +17,12 @@ idf.py build
 
 The binary lands at `build/wb-test-firmware.bin`.
 
+The default build uses 4MB flash with `partitions-4mb.csv`. For boards with
+larger flash (detected via `esptool.py flash_id`), rebuild with
+`-DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32s3"` and
+set `CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y` (or appropriate size) plus
+`CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"`.
+
 ## Flashing
 
 Upload to the workbench and flash via RFC2217:

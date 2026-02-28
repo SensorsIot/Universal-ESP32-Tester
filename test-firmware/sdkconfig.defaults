@@ -1,6 +1,7 @@
-# Partition table
+# Partition table — use partitions-4mb.csv for 4MB flash (default),
+# partitions.csv for 8MB+ flash
 CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions-4mb.csv"
 
 # NimBLE
 CONFIG_BT_ENABLED=y
