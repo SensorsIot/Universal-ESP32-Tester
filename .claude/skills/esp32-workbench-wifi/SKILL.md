@@ -110,7 +110,7 @@ curl "http://192.168.0.87:8080/api/wifi/events?timeout=30"
 
 ## HTTP Relay
 
-Make HTTP requests through the workbench's WiFi interface to reach devices on the WiFi network.
+**IMPORTANT:** Devices on the workbench AP (192.168.4.x) are NOT directly reachable from the development machine. Always use this relay to make HTTP requests to device endpoints (e.g. `/status`, `/ota`). The response body is base64-encoded — decode it to get the actual JSON.
 
 ```bash
 # GET request to device
@@ -123,6 +123,12 @@ BODY=$(echo -n '{"key":"value"}' | base64)
 curl -X POST http://192.168.0.87:8080/api/wifi/http \
   -H 'Content-Type: application/json' \
   -d "{\"method\": \"POST\", \"url\": \"http://192.168.4.2/config\", \"headers\": {\"Content-Type\": \"application/json\"}, \"body\": \"$BODY\", \"timeout\": 10}"
+
+# Decode the base64 response body
+curl -s -X POST http://192.168.0.87:8080/api/wifi/http \
+  -H 'Content-Type: application/json' \
+  -d '{"method": "GET", "url": "http://192.168.4.x:8080/endpoint", "timeout": 10}' \
+  | python3 -c "import json,sys,base64; r=json.load(sys.stdin); print(base64.b64decode(r['body']).decode())"
 ```
 
 ## WiFi Events
