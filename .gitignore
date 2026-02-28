@@ -7,3 +7,8 @@ __pycache__/
 .coverage
 .claude-data/
 *.log
+
+# ESP-IDF build artifacts
+build/
+sdkconfig
+sdkconfig.old
